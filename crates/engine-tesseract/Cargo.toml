@@ -1,0 +1,9 @@
+[package]
+name = "engine-tesseract"
+version = "0.1.0"
+edition = "2024"
+description = "Tesseract 5 CLI implementation of OcrEngine trait"
+
+[dependencies]
+ocr-api = { path = "../ocr-api" }
+tempfile = "3.8"

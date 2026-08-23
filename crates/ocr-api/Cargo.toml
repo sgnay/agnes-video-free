@@ -1,0 +1,8 @@
+[package]
+name = "ocr-api"
+version = "0.1.0"
+edition = "2024"
+description = "OCR Engine API traits and types"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }

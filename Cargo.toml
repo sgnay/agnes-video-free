@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    ".",
+    "crates/ocr-api",
+    "crates/engine-tesseract",
+]
+resolver = "2"
+
+[package]
+name = "simple-ocr"
+version = "0.1.0"
+edition = "2024"
+description = "Simple Linux desktop OCR application using GPUI"
+
+[dependencies]
+gpui = { package = "gpui-unofficial", version = "1.15.0", default-features = false, features = ["font-kit", "wayland", "x11"] }
+gpui_platform = { package = "gpui-platform-gpui-unofficial", version = "1.15.0" }
+
+ocr-api = { path = "crates/ocr-api" }
+engine-tesseract = { path = "crates/engine-tesseract" }
+
+ksni = "0.2"
+tempfile = "3.8"
+
+# Standard libs
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
