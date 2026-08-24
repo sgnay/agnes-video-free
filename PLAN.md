@@ -76,7 +76,7 @@ story.txt → 分句 → edge-tts 旁白 → ffprobe 量时长 → 算 num_frame
 | 异步 | `tokio` | HTTP / 轮询 / 并发 |
 | HTTP | `reqwest`（rustls） | Agnes API + 下载 |
 | 序列化 | `serde` / `serde_json` | storyboard.json 单一数据源（不引入 YAML 依赖） |
-| 交互 | `inquire` | 选择器 / 确认 / 多行输入 |
+| 交互 | Rust 标准库 `std::io` | 选择器 / 确认 / 文件读取 / 多行粘贴，避免额外运行时依赖 |
 | 错误 | `thiserror` + `anyhow` | 领域错误 + 顶层包装 |
 | 日志 | `tracing` + `tracing-subscriber` | 进度与断点日志 |
 | env | `dotenvy` | 读取 `.env` 中的 `AGNES_API_KEY` |
@@ -389,7 +389,7 @@ trait TtsProvider {
 
 ```
 ┌ 欢迎：agnes-video-free ─────────────────────────────┐
-│ 1. 选择风格      [crayon / textbook / realistic-*]  │  ← inquire Select
+│ 1. 选择风格      [crayon / textbook / realistic-*]  │  ← 编号选择
 │ 2. 选择平台预设  [TikTok 9:16 / 小红书 3:4 / 微博 16:9] │
 │ 3. 输入故事      [粘贴文本 / 读取文件 / 打开 $EDITOR] │
 │ 4. 分句预览      [展示 scenes，可增删改每句]         │
@@ -480,11 +480,16 @@ pending → tts_done → video_done → clip_done → assembled
 - **验收**：临时测试素材全流程产出 720×1280 H.264/AAC MP4（11.69s），字幕烧录成功，最终 ffprobe 音视频可读且时长 11.685s ✅
 
 ### M3 — 交互模式 + 风格完善 + Agent Skill
-- [ ] 交互式向导（inquire）全流程
-- [ ] realistic 风格族三档（cinematic/vlog/documentary）+ 平台预设
+- [x] 交互式向导全流程：无子命令或 `interactive` 进入，选择 realistic 风格/语言/音色/语速/输出目录，支持读取文件或多行粘贴，预览后执行 `split → tts → video → assemble`；输入 `q` 可取消，已有素材自动复用
+- [x] realistic 风格族三档（cinematic/vlog/documentary）+ 平台预设
 - [ ] textbook 简化方案评估（教学卡用 ASS 模拟 or 降级为字幕，决策后实现）
-- [ ] SKILL.md + references 文档 + `resume/status/clean`
+- [x] SKILL.md + references 文档（`resume/status` 已实现）
+- [ ] `clean`：按场景安全清理素材
 - **验收**：三种模式（交互/子命令/skill）均能从同一 story.txt 产出 TikTok/小红书/微博 三平台成片
+
+**当前交互向导行为**：风格档案自带推荐平台和画幅；向导先读取故事并展示分句/首场 prompt，用户确认后才创建 `storyboard.json` 并启动网络生成。每一步复用现有子命令，失败时保留已完成产物；独立平台覆盖和场景编辑留待后续迭代。
+
+**当前 Agent Skill 行为**：`SKILL.md` 规定先 dry-run、再分句/TTS/视频/组装，并要求 Agent 在每阶段报告产物与下一步；`references/agent-workflow.md` 提供可复制命令和基于 `status` 的恢复决策表。
 
 ### M4 — GUI + 发布（未来）
 - [x] **NixOS Flake 打包**（提前完成）：`flake.nix` / `shell.nix` / `flake.lock`，参照 simple-translation 方式，`rustPlatform.buildRustPackage` + cargoLock，运行时注入 ffmpeg PATH / `SSL_CERT_FILE` / 随包字体 `AGNES_VIDEO_FREE_FONTS`；`nix build` 与 `nix run .#` 实测通过
@@ -534,7 +539,8 @@ pending → tts_done → video_done → clip_done → assembled
 ```bash
 # 交互模式（推荐人类用户）
 agnes-video-free
-# → 选风格/平台 → 贴故事 → 等成片
+# 或显式运行：agnes-video-free interactive
+# → 选风格/语言/音色 → 读取或粘贴故事 → 预览 → 等成片
 
 # 子命令模式（脚本/agent）
 agnes-video-free init --title 我的小猫 --style realistic-vlog --platform xiaohongshu

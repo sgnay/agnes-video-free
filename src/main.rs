@@ -7,7 +7,8 @@ mod styles;
 mod tts;
 
 use std::fs;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
@@ -34,6 +35,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// 启动交互式向导（无子命令时也会进入）
+    Interactive,
+    /// 输出可用风格列表
+    Styles,
     /// 分句：把故事切成一句一拍，写入 storyboard.json
     Split(SplitArgs),
     /// 生成旁白 mp3（Rust 原生 edge-tts，免费无需 key）
@@ -44,12 +49,19 @@ enum Command {
     Assemble(AssembleArgs),
     /// 全流程；--dry-run 只预览分句与 prompt，不写文件
     All(AllArgs),
+    /// 查看每个场景的 TTS、视频、clip 和成片状态
+    Status(StatusArgs),
+    /// 从缺失阶段继续执行，已完成阶段自动跳过
+    Resume(ResumeArgs),
 }
 
 #[derive(Args)]
 struct SplitArgs {
     /// 故事文本路径（UTF-8）
     story: PathBuf,
+    /// 标题（默认使用故事文件名）
+    #[arg(long)]
+    title: Option<String>,
     /// 语言：zh | en
     #[arg(long, default_value = "zh")]
     lang: String,
@@ -151,20 +163,562 @@ struct AllArgs {
     out: PathBuf,
 }
 
+#[derive(Args)]
+struct StatusArgs {
+    /// storyboard.json 路径
+    #[arg(long, default_value = "storyboard.json")]
+    storyboard: PathBuf,
+    /// 旁白目录
+    #[arg(long, default_value = "audio/narration")]
+    audio_dir: PathBuf,
+    /// 视频片段目录
+    #[arg(long, default_value = "assets/videos")]
+    video_dir: PathBuf,
+    /// 最终成片路径
+    #[arg(long, default_value = "out/story.mp4")]
+    output: PathBuf,
+}
+
+#[derive(Args)]
+struct ResumeArgs {
+    /// storyboard.json 路径
+    #[arg(long, default_value = "storyboard.json")]
+    storyboard: PathBuf,
+    /// 旁白目录
+    #[arg(long, default_value = "audio/narration")]
+    audio_dir: PathBuf,
+    /// 视频片段目录
+    #[arg(long, default_value = "assets/videos")]
+    video_dir: PathBuf,
+    /// 字体目录（不存在时回退到 AGNES_VIDEO_FREE_FONTS）
+    #[arg(long, default_value = "assets/fonts")]
+    fonts_dir: PathBuf,
+    /// 最终成片路径
+    #[arg(long, default_value = "out/story.mp4")]
+    output: PathBuf,
+    /// 音色（指定后覆盖 --gender 的默认值）
+    #[arg(long)]
+    voice: Option<String>,
+    /// 性别（决定默认音色）
+    #[arg(long, value_enum, default_value_t = Gender::Female)]
+    gender: Gender,
+    /// 语速（1.0 = 正常）
+    #[arg(long, default_value_t = 1.0)]
+    speed: f64,
+    /// Agnes API 根地址
+    #[arg(long, default_value = agnes::DEFAULT_BASE_URL)]
+    api_base_url: String,
+    /// 轮询间隔（秒）
+    #[arg(long, default_value_t = 8)]
+    poll_interval: u64,
+    /// 单段最大轮询时间（秒）
+    #[arg(long, default_value_t = 900)]
+    poll_timeout: u64,
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        None => list_styles(),
+        None | Some(Command::Interactive) => cmd_interactive().await,
+        Some(Command::Styles) => list_styles(),
         Some(Command::Split(a)) => cmd_split(&a),
         Some(Command::Tts(a)) => cmd_tts(&a).await,
         Some(Command::Video(a)) => cmd_video(&a).await,
         Some(Command::Assemble(a)) => cmd_assemble(&a),
         Some(Command::All(a)) => cmd_all(&a),
+        Some(Command::Status(a)) => cmd_status(&a),
+        Some(Command::Resume(a)) => cmd_resume(&a).await,
     }
 }
 
-/// 默认入口：输出可用风格与完整三段式配置总览（交互式向导后续接入）。
+fn cmd_status(args: &StatusArgs) -> ExitCode {
+    let storyboard = match read_storyboard(&args.storyboard) {
+        Ok(sb) => sb,
+        Err(e) => return err(&e),
+    };
+    if storyboard.scenes.is_empty() {
+        return err("storyboard 没有任何场景");
+    }
+
+    let clip_dir = args
+        .output
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".agnes-video-free");
+    println!("项目: {}", storyboard.title);
+    println!(
+        "风格: {} | 场景: {}",
+        storyboard.style,
+        storyboard.scenes.len()
+    );
+    println!();
+    println!("场景     TTS       视频      clip      状态");
+    println!("────────────────────────────────────────────");
+
+    let mut tts_done = 0;
+    let mut video_done = 0;
+    let mut clip_done = 0;
+    for scene in &storyboard.scenes {
+        let audio = args.audio_dir.join(format!("{}.mp3", scene.id));
+        let video = args.video_dir.join(format!("{}.mp4", scene.id));
+        let clip = clip_dir.join(format!("{}.mp4", scene.id));
+        let audio_ok = has_file(&audio, 1);
+        let video_ok = has_file(&video, MIN_VIDEO_BYTES);
+        let clip_ok = has_file(&clip, 1);
+        tts_done += usize::from(audio_ok);
+        video_done += usize::from(video_ok);
+        clip_done += usize::from(clip_ok);
+        let state = if clip_ok {
+            "ready"
+        } else if video_ok {
+            "待组装"
+        } else if audio_ok {
+            "待视频"
+        } else {
+            "待旁白"
+        };
+        println!(
+            "{:<8} {:<9} {:<9} {:<9} {}",
+            scene.id,
+            marker(audio_ok),
+            marker(video_ok),
+            marker(clip_ok),
+            state
+        );
+    }
+    println!();
+    println!(
+        "进度: TTS {}/{}，视频 {}/{}，clip {}/{}",
+        tts_done,
+        storyboard.scenes.len(),
+        video_done,
+        storyboard.scenes.len(),
+        clip_done,
+        storyboard.scenes.len()
+    );
+    println!(
+        "最终成片: {} {}",
+        marker(has_file(&args.output, MIN_VIDEO_BYTES)),
+        args.output.display()
+    );
+    ExitCode::SUCCESS
+}
+
+async fn cmd_resume(args: &ResumeArgs) -> ExitCode {
+    dotenvy::dotenv().ok();
+    let storyboard = match read_storyboard(&args.storyboard) {
+        Ok(sb) => sb,
+        Err(e) => return err(&e),
+    };
+    if storyboard.scenes.is_empty() {
+        return err("storyboard 没有任何场景");
+    }
+
+    let needs_tts = storyboard
+        .scenes
+        .iter()
+        .any(|scene| !has_file(&args.audio_dir.join(format!("{}.mp3", scene.id)), 1));
+    if needs_tts {
+        println!("恢复阶段 1/3：补齐缺失旁白（已有有效文件自动跳过）");
+        let tts_code = cmd_tts(&TtsArgs {
+            storyboard: args.storyboard.clone(),
+            voice: args.voice.clone(),
+            gender: args.gender,
+            speed: args.speed,
+            out_dir: args.audio_dir.clone(),
+        })
+        .await;
+        if tts_code != ExitCode::SUCCESS {
+            return tts_code;
+        }
+    } else {
+        println!("恢复阶段 1/3：旁白已齐全，跳过");
+    }
+
+    let needs_video = storyboard.scenes.iter().any(|scene| {
+        !has_file(
+            &args.video_dir.join(format!("{}.mp4", scene.id)),
+            MIN_VIDEO_BYTES,
+        )
+    });
+    if needs_video {
+        println!("恢复阶段 2/3：补齐缺失视频（已有有效文件自动跳过）");
+        let video_code = cmd_video(&VideoArgs {
+            storyboard: args.storyboard.clone(),
+            audio_dir: args.audio_dir.clone(),
+            out_dir: args.video_dir.clone(),
+            api_base_url: args.api_base_url.clone(),
+            poll_interval: args.poll_interval,
+            poll_timeout: args.poll_timeout,
+            concurrency: 1,
+        })
+        .await;
+        if video_code != ExitCode::SUCCESS {
+            return video_code;
+        }
+    } else {
+        println!("恢复阶段 2/3：视频已齐全，跳过（不会请求 Agnes API）");
+    }
+
+    if has_file(&args.output, MIN_VIDEO_BYTES) {
+        println!(
+            "恢复阶段 3/3：最终成片已存在，跳过组装 → {}",
+            args.output.display()
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    println!("恢复阶段 3/3：组装最终成片");
+    cmd_assemble(&AssembleArgs {
+        storyboard: args.storyboard.clone(),
+        audio_dir: args.audio_dir.clone(),
+        video_dir: args.video_dir.clone(),
+        fonts_dir: args.fonts_dir.clone(),
+        output: args.output.clone(),
+    })
+}
+
+fn has_file(path: &Path, min_bytes: usize) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.len() >= min_bytes as u64)
+        .unwrap_or(false)
+}
+
+fn marker(done: bool) -> &'static str {
+    if done { "✓" } else { "—" }
+}
+
+/// 交互式向导：收集配置后按 split → tts → video → assemble 执行。
+async fn cmd_interactive() -> ExitCode {
+    println!("╔══════════════════════════════════════════════════════╗");
+    println!("║          agnes-video-free 交互式向导                 ║");
+    println!("╚══════════════════════════════════════════════════════╝");
+    println!("输入 q 可在任意配置步骤取消。每个阶段都会保留已生成的文件，便于稍后续跑。\n");
+
+    let profiles = styles::all();
+    let style_options: Vec<String> = profiles
+        .iter()
+        .map(|style| {
+            format!(
+                "{} — {}（{}，{}x{}）",
+                style.name,
+                style.id,
+                style.default_platform.label(),
+                style.canvas.0,
+                style.canvas.1
+            )
+        })
+        .collect();
+    let style_index = match prompt_choice("选择风格", &style_options, 0) {
+        Ok(index) => index,
+        Err(e) => return wizard_error(&e),
+    };
+    let style = profiles[style_index].clone();
+
+    let lang_options = vec!["中文（zh）".to_string(), "English（en）".to_string()];
+    let lang_index = match prompt_choice("选择旁白语言", &lang_options, 0) {
+        Ok(index) => index,
+        Err(e) => return wizard_error(&e),
+    };
+    let lang = if lang_index == 0 { Lang::Zh } else { Lang::En };
+
+    let source_options = vec!["读取故事文件".to_string(), "直接粘贴故事".to_string()];
+    let source_index = match prompt_choice("选择故事来源", &source_options, 0) {
+        Ok(index) => index,
+        Err(e) => return wizard_error(&e),
+    };
+    let (story, story_input, title_default) = if source_index == 0 {
+        let path = match prompt_line(
+            "故事文件路径（UTF-8）",
+            Some("examples/story_realistic.txt"),
+        ) {
+            Ok(value) => PathBuf::from(value),
+            Err(e) => return wizard_error(&e),
+        };
+        let story = match read_story(&path) {
+            Ok(story) => story,
+            Err(e) => return wizard_error(&e),
+        };
+        let title = path
+            .file_stem()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "story".to_string());
+        (story, Some(path), title)
+    } else {
+        let story = match read_pasted_story() {
+            Ok(story) => story,
+            Err(e) => return wizard_error(&e),
+        };
+        (story, None, "story".to_string())
+    };
+    let scenes = pipeline::plan_scenes(&story, lang, &style);
+    if scenes.is_empty() {
+        return wizard_error("故事没有可用内容，请检查输入内容");
+    }
+
+    let project_dir = match prompt_line("项目输出目录", Some(".")) {
+        Ok(value) => PathBuf::from(value),
+        Err(e) => return wizard_error(&e),
+    };
+    let pasted_story = story_input.is_none();
+    let story_input = story_input.unwrap_or_else(|| project_dir.join("story.txt"));
+    let title = match prompt_line("成片标题", Some(&title_default)) {
+        Ok(value) if !value.trim().is_empty() => sanitize_title(&value),
+        Ok(_) => return wizard_error("成片标题不能为空"),
+        Err(e) => return wizard_error(&e),
+    };
+    if title.is_empty() {
+        return wizard_error("成片标题不能只包含路径分隔符或控制字符");
+    }
+
+    let gender_options = vec!["女声".to_string(), "男声".to_string()];
+    let gender_index = match prompt_choice("选择 TTS 音色性别", &gender_options, 0) {
+        Ok(index) => index,
+        Err(e) => return wizard_error(&e),
+    };
+    let speed = match prompt_line("TTS 语速（1.0 为正常）", Some("1.0")) {
+        Ok(value) => match value.parse::<f64>() {
+            Ok(speed) if speed.is_finite() && speed > 0.0 => speed,
+            _ => return wizard_error("语速必须是大于 0 的数字"),
+        },
+        Err(e) => return wizard_error(&e),
+    };
+
+    dotenvy::dotenv().ok();
+    if std::env::var("AGNES_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .is_none()
+    {
+        return wizard_error("未找到 AGNES_API_KEY，请设置环境变量或在当前目录 .env 中配置");
+    }
+
+    let storyboard = project_dir.join("storyboard.json");
+    let audio_dir = project_dir.join("audio/narration");
+    let video_dir = project_dir.join("assets/videos");
+    let fonts_dir = project_dir.join("assets/fonts");
+    let output = project_dir.join("out").join(format!("{title}.mp4"));
+
+    println!("\n═══ 配置确认 ═══");
+    println!("故事: {}", story_input.display());
+    println!("场景: {} 场", scenes.len());
+    println!(
+        "风格: {}（{}，{}x{}）",
+        style.id,
+        style.default_platform.label(),
+        style.canvas.0,
+        style.canvas.1
+    );
+    println!(
+        "语言: {} | 音色: {} | 语速: {speed:.2}",
+        lang.label(),
+        if gender_index == 0 {
+            "女声"
+        } else {
+            "男声"
+        }
+    );
+    println!("输出: {}", output.display());
+    println!("\n分句预览:");
+    print_scenes(&scenes);
+    println!("\n首场 prompt 预览:");
+    println!("{}", scenes[0].prompt.as_deref().unwrap_or_default());
+
+    let confirmed = match prompt_yes_no("确认开始执行完整流程？", true) {
+        Ok(value) => value,
+        Err(e) => return wizard_error(&e),
+    };
+    if !confirmed {
+        println!("已取消，未执行任何生成阶段。");
+        return ExitCode::SUCCESS;
+    }
+
+    if let Err(e) = fs::create_dir_all(&project_dir) {
+        return err(&format!("创建项目目录 {} 失败: {e}", project_dir.display()));
+    }
+    if pasted_story && let Err(e) = fs::write(&story_input, &story) {
+        return err(&format!(
+            "写入粘贴的故事 {} 失败: {e}",
+            story_input.display()
+        ));
+    }
+
+    println!("\n═══ 1/4 分句并写入 storyboard ═══");
+    let split_code = cmd_split(&SplitArgs {
+        story: story_input,
+        title: Some(title.clone()),
+        lang: lang.label().to_string(),
+        style: style.id.to_string(),
+        out: storyboard.clone(),
+    });
+    if split_code != ExitCode::SUCCESS {
+        return split_code;
+    }
+
+    println!("\n═══ 2/4 生成旁白 ═══");
+    let tts_code = cmd_tts(&TtsArgs {
+        storyboard: storyboard.clone(),
+        voice: None,
+        gender: if gender_index == 0 {
+            Gender::Female
+        } else {
+            Gender::Male
+        },
+        speed,
+        out_dir: audio_dir.clone(),
+    })
+    .await;
+    if tts_code != ExitCode::SUCCESS {
+        return tts_code;
+    }
+
+    println!("\n═══ 3/4 生成 Agnes 视频片段 ═══");
+    let video_code = cmd_video(&VideoArgs {
+        storyboard: storyboard.clone(),
+        audio_dir,
+        out_dir: video_dir,
+        api_base_url: agnes::DEFAULT_BASE_URL.to_string(),
+        poll_interval: 8,
+        poll_timeout: 900,
+        concurrency: 1,
+    })
+    .await;
+    if video_code != ExitCode::SUCCESS {
+        return video_code;
+    }
+
+    println!("\n═══ 4/4 组装最终成片 ═══");
+    let assemble_code = cmd_assemble(&AssembleArgs {
+        storyboard,
+        audio_dir: project_dir.join("audio/narration"),
+        video_dir: project_dir.join("assets/videos"),
+        fonts_dir,
+        output: output.clone(),
+    });
+    if assemble_code != ExitCode::SUCCESS {
+        return assemble_code;
+    }
+    println!("\n向导完成，成片位于: {}", output.display());
+    ExitCode::SUCCESS
+}
+
+fn read_pasted_story() -> Result<String, String> {
+    println!("请粘贴故事内容；完成后输入单独一行 END：");
+    let mut story = String::new();
+    loop {
+        let mut line = String::new();
+        let read = io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| format!("读取故事内容失败: {e}"))?;
+        if read == 0 {
+            return Err("输入已结束，故事粘贴未完成".to_string());
+        }
+        if line.trim() == "END" {
+            break;
+        }
+        story.push_str(&line);
+    }
+    if story.trim().is_empty() {
+        Err("粘贴的故事不能为空".to_string())
+    } else {
+        Ok(story)
+    }
+}
+
+fn prompt_line(label: &str, default: Option<&str>) -> Result<String, String> {
+    match default {
+        Some(default) => print!("{label} [{default}]: "),
+        None => print!("{label}: "),
+    }
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("刷新终端输出失败: {e}"))?;
+    let mut value = String::new();
+    let read = io::stdin()
+        .read_line(&mut value)
+        .map_err(|e| format!("读取终端输入失败: {e}"))?;
+    if read == 0 {
+        return Err("输入已结束，向导取消".to_string());
+    }
+    let value = value.trim().to_string();
+    if value.eq_ignore_ascii_case("q") {
+        return Err("用户取消向导".to_string());
+    }
+    if value.is_empty() {
+        Ok(default.unwrap_or_default().to_string())
+    } else {
+        Ok(value)
+    }
+}
+
+fn prompt_choice(label: &str, options: &[String], default: usize) -> Result<usize, String> {
+    if options.is_empty() || default >= options.len() {
+        return Err(format!("{label} 没有可用选项"));
+    }
+    println!("{label}:");
+    for (index, option) in options.iter().enumerate() {
+        println!("  {}. {}", index + 1, option);
+    }
+    let default_value = (default + 1).to_string();
+    loop {
+        let value = prompt_line(
+            &format!("请输入编号（默认 {}）", default + 1),
+            Some(&default_value),
+        )?;
+        let value = match value.parse::<usize>() {
+            Ok(value) => value,
+            Err(_) => {
+                println!("请输入有效编号。");
+                continue;
+            }
+        };
+        if (1..=options.len()).contains(&value) {
+            return Ok(value - 1);
+        }
+        println!("请输入 1 到 {} 之间的编号。", options.len());
+    }
+}
+
+fn prompt_yes_no(label: &str, default: bool) -> Result<bool, String> {
+    let suffix = if default { "Y/n" } else { "y/N" };
+    loop {
+        let value = prompt_line(&format!("{label} [{suffix}]"), None)?;
+        if value.is_empty() {
+            return Ok(default);
+        }
+        match value.to_ascii_lowercase().as_str() {
+            "y" | "yes" | "是" => return Ok(true),
+            "n" | "no" | "否" => return Ok(false),
+            _ => println!("请输入 y 或 n。"),
+        }
+    }
+}
+
+fn sanitize_title(title: &str) -> String {
+    title
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch == '/' || ch == '\\' || ch.is_control() {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
+fn wizard_error(message: &str) -> ExitCode {
+    if message == "用户取消向导" || message == "输入已结束，向导取消" {
+        println!("\n{message}。");
+        ExitCode::SUCCESS
+    } else {
+        err(message)
+    }
+}
+
+/// 输出可用风格与完整三段式配置总览。
 fn list_styles() -> ExitCode {
     let styles = styles::all();
     println!(
@@ -215,11 +769,12 @@ fn cmd_split(args: &SplitArgs) -> ExitCode {
     let scenes = pipeline::plan_scenes(&story, lang, &style);
     print_scenes(&scenes);
 
-    let title = args
-        .story
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "未命名".to_string());
+    let title = args.title.clone().unwrap_or_else(|| {
+        args.story
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "未命名".to_string())
+    });
     let sb = pipeline::build_storyboard(&title, lang, &style, scenes);
     match write_storyboard(&sb, &args.out) {
         Ok(()) => ExitCode::SUCCESS,
@@ -261,10 +816,13 @@ async fn cmd_tts(args: &TtsArgs) -> ExitCode {
 
     for scene in &sb.scenes {
         let out = args.out_dir.join(format!("{}.mp3", scene.id));
-        if out.exists() {
+        if has_file(&out, 1) {
             println!("  {} 已存在，跳过", out.display());
             skipped += 1;
             continue;
+        }
+        if out.exists() {
+            println!("  {} 文件为空或无效，将重新生成", out.display());
         }
         print!("  合成 {} … ", scene.id);
         match synthesize_with_retry(
@@ -593,4 +1151,73 @@ fn unknown_style(id: &str) -> String {
 fn err(msg: &str) -> ExitCode {
     eprintln!("错误: {msg}");
     ExitCode::from(2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_title_prevents_path_traversal_and_control_chars() {
+        assert_eq!(sanitize_title(" 春日/故事\\n "), "春日_故事_n");
+        assert_eq!(sanitize_title(" 旅行 "), "旅行");
+    }
+
+    #[tokio::test]
+    async fn resume_skips_completed_media_without_api_request() {
+        let root =
+            std::env::temp_dir().join(format!("agnes-video-free-resume-{}", std::process::id()));
+        let audio_dir = root.join("audio/narration");
+        let video_dir = root.join("assets/videos");
+        let output = root.join("out/story.mp4");
+        fs::create_dir_all(&audio_dir).unwrap();
+        fs::create_dir_all(&video_dir).unwrap();
+        fs::create_dir_all(output.parent().unwrap()).unwrap();
+
+        let storyboard = Storyboard {
+            title: "resume-test".to_string(),
+            lang: "zh".to_string(),
+            style: "realistic-cinematic".to_string(),
+            width: 720,
+            height: 1280,
+            fps: 30,
+            frame_rate_video: 24,
+            scenes: vec![models::Scene {
+                id: "s01".to_string(),
+                caption: "测试场景。".to_string(),
+                narration: "测试场景。".to_string(),
+                prompt: Some("prompt".to_string()),
+                negative_prompt: Some("negative".to_string()),
+                narration_audio: None,
+                motion_video: None,
+                duration_sec: None,
+                num_frames: None,
+            }],
+        };
+        fs::write(
+            root.join("storyboard.json"),
+            serde_json::to_vec(&storyboard).unwrap(),
+        )
+        .unwrap();
+        fs::write(audio_dir.join("s01.mp3"), [1_u8]).unwrap();
+        fs::write(video_dir.join("s01.mp4"), vec![1_u8; MIN_VIDEO_BYTES]).unwrap();
+        fs::write(&output, vec![1_u8; MIN_VIDEO_BYTES]).unwrap();
+
+        let code = cmd_resume(&ResumeArgs {
+            storyboard: root.join("storyboard.json"),
+            audio_dir,
+            video_dir,
+            fonts_dir: root.join("assets/fonts"),
+            output,
+            voice: None,
+            gender: Gender::Female,
+            speed: 1.0,
+            api_base_url: agnes::DEFAULT_BASE_URL.to_string(),
+            poll_interval: 1,
+            poll_timeout: 1,
+        })
+        .await;
+        assert_eq!(code, ExitCode::SUCCESS);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

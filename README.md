@@ -11,10 +11,25 @@
 
 ## 快速开始
 
+推荐直接使用交互式向导。无子命令或显式运行 `interactive` 都会进入向导：
+
 ```bash
 # 环境变量（或在工作区放 .env 一行 AGNES_API_KEY=sk-...）
 export AGNES_API_KEY=sk-...
 
+# 交互式全流程：选择风格/语言/音色/输出目录，确认后依次执行四个阶段
+agnes-video-free
+# 等价写法
+agnes-video-free interactive
+```
+
+向导会让你选择风格、语言、故事来源（文件或多行粘贴）、音色和语速；随后展示分句和首场 prompt 预览，确认后依次执行 `split → tts → video → assemble`。
+默认产物为 `storyboard.json`、`audio/narration/`、`assets/videos/` 和 `out/<标题>.mp4`；输入 `q` 可取消配置。
+已有 mp3/mp4 会自动跳过，已完成的文件会保留，便于后续手动重跑子命令。
+
+需要脚本或 Agent 调用时，仍可使用以下子命令：
+
+```bash
 # ① 分句 + 预览 prompt（不请求任何生成 API）
 agnes-video-free all examples/story_realistic.txt --dry-run
 
@@ -30,11 +45,18 @@ agnes-video-free video
 # ⑤ 组装成片（ffmpeg + libass）
 agnes-video-free assemble --fonts-dir assets/fonts --output out/story.mp4
 
+# 查看每场状态
+agnes-video-free status
+
+# 中断后继续：只补齐缺失阶段，不重复请求已完成素材
+agnes-video-free resume --output out/story.mp4
+
 # 输出：out/story.mp4（H.264 + AAC，字幕已烧录）
 ```
 
 风格：`realistic-cinematic`（TikTok 9:16）/ `realistic-vlog`（小红书 3:4）/
 `realistic-documentary`（微博 16:9）。配方见 [references/prompt-recipes.md](references/prompt-recipes.md)。
+Agent 调用契约见 [SKILL.md](SKILL.md) 和 [references/agent-workflow.md](references/agent-workflow.md)。
 
 ## NixOS 打包与运行
 
@@ -74,18 +96,19 @@ Flake 包会自动注入 `PATH`（ffmpeg/ffprobe）、`SSL_CERT_FILE`（cacert�
 
 ```
 src/
-├── main.rs        # clap 子命令：split / tts / video / assemble / all
+├── main.rs        # clap 子命令、interactive 向导与 status/resume
 ├── models.rs      # Storyboard / Scene / StyleProfile / num_frames 计算
 ├── split.rs       # 中英文分句（一句一拍）
 ├── pipeline.rs    # 全流程编排（分句 → prompt → storyboard）
 ├── styles/        # 风格注册表（realistic 族 + 共享负向词基线）
 └── tts/           # Rust 原生 edge-tts（kothok-edge-tts）
 assets/fonts/      # 思源黑体 SC（OFL）
-references/        # prompt 配方 / 流程细节
+references/        # prompt 配方 / Agent 调用与流程细节
 ```
 
 ## 开发状态
 
 - M0 ✅ 脚手架、clap 子命令、中英文分句、dry-run 预览
 - M1 🚧 TTS ✅；ffprobe 封装 + Agnes 视频 API 客户端 ✅；真实视频生成需配置 `AGNES_API_KEY` 后运行 `video`
-- M2 ✅ 成片组装（ffmpeg + libass：场景封装、concat、ASS 字幕、画幅校验）；M3 交互模式 + agent skill；M4 GUI
+- M2 ✅ 成片组装（ffmpeg + libass：场景封装、concat、ASS 字幕、画幅校验）
+- M3 🚧 交互式向导 ✅；`status` / `resume` ✅；Agent Skill ✅；`clean`、visual_plan 支持待实现；M4 GUI
