@@ -6,6 +6,7 @@ mod split;
 mod styles;
 mod tts;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -53,6 +54,8 @@ enum Command {
     Status(StatusArgs),
     /// 从缺失阶段继续执行，已完成阶段自动跳过
     Resume(ResumeArgs),
+    /// 安全清理单个场景的生成产物
+    Clean(CleanArgs),
 }
 
 #[derive(Args)]
@@ -68,6 +71,9 @@ struct SplitArgs {
     /// 风格 id（realistic-cinematic / realistic-vlog / realistic-documentary）
     #[arg(long, default_value = "realistic-cinematic")]
     style: String,
+    /// 可选 visual_plan.json（key 为 s01/01，value 为英文画面描述）
+    #[arg(long)]
+    visual_plan: Option<PathBuf>,
     /// 输出 storyboard.json 路径
     #[arg(long, default_value = "storyboard.json")]
     out: PathBuf,
@@ -96,6 +102,14 @@ struct TtsArgs {
 enum Gender {
     Female,
     Male,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy)]
+enum CleanStage {
+    Audio,
+    Video,
+    Clip,
+    All,
 }
 
 #[derive(Args)]
@@ -155,6 +169,9 @@ struct AllArgs {
     /// 风格 id
     #[arg(long, default_value = "realistic-cinematic")]
     style: String,
+    /// 可选 visual_plan.json（key 为 s01/01，value 为英文画面描述）
+    #[arg(long)]
+    visual_plan: Option<PathBuf>,
     /// dry-run：只预览分句与 prompt，不写文件
     #[arg(long)]
     dry_run: bool,
@@ -216,6 +233,34 @@ struct ResumeArgs {
     poll_timeout: u64,
 }
 
+#[derive(Args)]
+struct CleanArgs {
+    /// storyboard.json 路径，用于校验场景 ID
+    #[arg(long, default_value = "storyboard.json")]
+    storyboard: PathBuf,
+    /// 要清理的单个场景 ID，例如 s07
+    #[arg(long)]
+    scene: String,
+    /// 清理阶段：audio / video / clip / all
+    #[arg(long, value_enum, default_value_t = CleanStage::All)]
+    stage: CleanStage,
+    /// 旁白目录
+    #[arg(long, default_value = "audio/narration")]
+    audio_dir: PathBuf,
+    /// 视频片段目录
+    #[arg(long, default_value = "assets/videos")]
+    video_dir: PathBuf,
+    /// 最终输出路径（用于定位临时 clip；最终成片不会被删除）
+    #[arg(long, default_value = "out/story.mp4")]
+    output: PathBuf,
+    /// 只显示待删除文件，不执行删除
+    #[arg(long)]
+    dry_run: bool,
+    /// 确认执行删除；不提供时命令只做预览并退出
+    #[arg(long)]
+    yes: bool,
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -229,6 +274,7 @@ async fn main() -> ExitCode {
         Some(Command::All(a)) => cmd_all(&a),
         Some(Command::Status(a)) => cmd_status(&a),
         Some(Command::Resume(a)) => cmd_resume(&a).await,
+        Some(Command::Clean(a)) => cmd_clean(&a),
     }
 }
 
@@ -253,8 +299,8 @@ fn cmd_status(args: &StatusArgs) -> ExitCode {
         storyboard.scenes.len()
     );
     println!();
-    println!("场景     TTS       视频      clip      状态");
-    println!("────────────────────────────────────────────");
+    println!("场景     TTS       视频      任务                  clip      状态");
+    println!("────────────────────────────────────────────────────────────");
 
     let mut tts_done = 0;
     let mut video_done = 0;
@@ -269,20 +315,24 @@ fn cmd_status(args: &StatusArgs) -> ExitCode {
         tts_done += usize::from(audio_ok);
         video_done += usize::from(video_ok);
         clip_done += usize::from(clip_ok);
+        let task = scene.agnes_task_id.as_deref().unwrap_or("—");
         let state = if clip_ok {
             "ready"
         } else if video_ok {
             "待组装"
+        } else if scene.agnes_task_id.is_some() {
+            "任务待轮询"
         } else if audio_ok {
             "待视频"
         } else {
             "待旁白"
         };
         println!(
-            "{:<8} {:<9} {:<9} {:<9} {}",
+            "{:<8} {:<9} {:<9} {:<9} {:<20} {}",
             scene.id,
             marker(audio_ok),
             marker(video_ok),
+            task,
             marker(clip_ok),
             state
         );
@@ -342,6 +392,7 @@ async fn cmd_resume(args: &ResumeArgs) -> ExitCode {
             MIN_VIDEO_BYTES,
         )
     });
+    let had_missing_media = needs_tts || needs_video;
     if needs_video {
         println!("恢复阶段 2/3：补齐缺失视频（已有有效文件自动跳过）");
         let video_code = cmd_video(&VideoArgs {
@@ -361,12 +412,15 @@ async fn cmd_resume(args: &ResumeArgs) -> ExitCode {
         println!("恢复阶段 2/3：视频已齐全，跳过（不会请求 Agnes API）");
     }
 
-    if has_file(&args.output, MIN_VIDEO_BYTES) {
+    if !had_missing_media && has_file(&args.output, MIN_VIDEO_BYTES) {
         println!(
             "恢复阶段 3/3：最终成片已存在，跳过组装 → {}",
             args.output.display()
         );
         return ExitCode::SUCCESS;
+    }
+    if had_missing_media && has_file(&args.output, MIN_VIDEO_BYTES) {
+        println!("恢复阶段 3/3：检测到素材曾缺失，将重新组装并覆盖现有成片");
     }
 
     println!("恢复阶段 3/3：组装最终成片");
@@ -377,6 +431,141 @@ async fn cmd_resume(args: &ResumeArgs) -> ExitCode {
         fonts_dir: args.fonts_dir.clone(),
         output: args.output.clone(),
     })
+}
+
+fn cmd_clean(args: &CleanArgs) -> ExitCode {
+    let mut storyboard = match read_storyboard(&args.storyboard) {
+        Ok(sb) => sb,
+        Err(e) => return err(&e),
+    };
+    if !safe_scene_id(&args.scene) {
+        return err("场景 ID 不安全，只允许字母、数字、短横线和下划线");
+    }
+    let Some(scene_index) = storyboard
+        .scenes
+        .iter()
+        .position(|scene| scene.id == args.scene)
+    else {
+        return err(&format!("storyboard 中不存在场景 {}", args.scene));
+    };
+
+    let clip_dir = args
+        .output
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".agnes-video-free");
+    let audio = args.audio_dir.join(format!("{}.mp3", args.scene));
+    let video = args.video_dir.join(format!("{}.mp4", args.scene));
+    let clip = clip_dir.join(format!("{}.mp4", args.scene));
+    let targets: Vec<(&str, PathBuf)> = match args.stage {
+        // 音频或视频变化都会使已经封装的 clip 失效，因此一并清理 clip。
+        CleanStage::Audio => vec![("audio", audio), ("clip", clip)],
+        CleanStage::Video => vec![("video", video), ("clip", clip)],
+        CleanStage::Clip => vec![("clip", clip)],
+        CleanStage::All => vec![("audio", audio), ("video", video), ("clip", clip)],
+    };
+
+    println!(
+        "清理场景 {}（阶段: {}）",
+        args.scene,
+        clean_stage_label(args.stage)
+    );
+    for (kind, path) in &targets {
+        let present = std::fs::symlink_metadata(path).is_ok();
+        println!(
+            "  {:<5} {} {}",
+            kind,
+            if present { "删除" } else { "不存在" },
+            path.display()
+        );
+    }
+    println!("  最终成片保留: {}", args.output.display());
+
+    if args.dry_run {
+        println!("[dry-run] 未删除任何文件，也未修改 storyboard。");
+        return ExitCode::SUCCESS;
+    }
+    if !args.yes {
+        return err("为安全起见，实际删除必须显式添加 --yes；仅预览请使用 --dry-run");
+    }
+
+    let mut cleared_audio = false;
+    let mut cleared_video = false;
+    let mut failures = Vec::new();
+    for (kind, path) in &targets {
+        match remove_file_if_present(path) {
+            Ok(true) => {
+                println!("  ✓ 已清理 {}: {}", kind, path.display());
+                match *kind {
+                    "audio" => cleared_audio = true,
+                    "video" => cleared_video = true,
+                    _ => {}
+                }
+            }
+            Ok(false) => {
+                println!("  - {} 不存在，跳过", path.display());
+                match *kind {
+                    "audio" => cleared_audio = true,
+                    "video" => cleared_video = true,
+                    _ => {}
+                }
+            }
+            Err(e) => failures.push(e),
+        }
+    }
+
+    let scene = &mut storyboard.scenes[scene_index];
+    if cleared_audio {
+        scene.narration_audio = None;
+        scene.agnes_task_id = None;
+        scene.duration_sec = None;
+        scene.num_frames = None;
+    }
+    if cleared_video {
+        scene.motion_video = None;
+        scene.agnes_task_id = None;
+        scene.num_frames = None;
+    }
+    if let Err(e) = write_storyboard(&storyboard, &args.storyboard) {
+        return err(&e);
+    }
+    println!("已同步 storyboard 场景状态；最终成片未删除，请在素材恢复后重新 assemble。");
+
+    if failures.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        err(&failures.join("；"))
+    }
+}
+
+fn remove_file_if_present(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => {
+            std::fs::remove_file(path)
+                .map(|()| true)
+                .map_err(|e| format!("删除 {} 失败: {e}", path.display()))
+        }
+        Ok(_) => Err(format!("{} 不是普通文件，拒绝删除", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("检查 {} 失败: {error}", path.display())),
+    }
+}
+
+fn safe_scene_id(scene_id: &str) -> bool {
+    !scene_id.is_empty()
+        && scene_id.len() <= 64
+        && scene_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn clean_stage_label(stage: CleanStage) -> &'static str {
+    match stage {
+        CleanStage::Audio => "audio",
+        CleanStage::Video => "video",
+        CleanStage::Clip => "clip",
+        CleanStage::All => "all",
+    }
 }
 
 fn has_file(path: &Path, min_bytes: usize) -> bool {
@@ -452,7 +641,19 @@ async fn cmd_interactive() -> ExitCode {
         };
         (story, None, "story".to_string())
     };
-    let scenes = pipeline::plan_scenes(&story, lang, &style);
+    let visual_plan_path = match prompt_line("visual_plan.json 路径（可留空）", None) {
+        Ok(value) if value.is_empty() => None,
+        Ok(value) => Some(PathBuf::from(value)),
+        Err(e) => return wizard_error(&e),
+    };
+    let visual_plan = match read_visual_plan(visual_plan_path.as_deref()) {
+        Ok(plan) => plan,
+        Err(e) => return wizard_error(&e),
+    };
+    let scenes = match visual_plan.as_ref() {
+        Some(plan) => pipeline::plan_scenes_with_visual_plan(&story, lang, &style, Some(plan)),
+        None => pipeline::plan_scenes(&story, lang, &style),
+    };
     if scenes.is_empty() {
         return wizard_error("故事没有可用内容，请检查输入内容");
     }
@@ -520,6 +721,9 @@ async fn cmd_interactive() -> ExitCode {
         }
     );
     println!("输出: {}", output.display());
+    if let Some(path) = &visual_plan_path {
+        println!("画面计划: {}", path.display());
+    }
     println!("\n分句预览:");
     print_scenes(&scenes);
     println!("\n首场 prompt 预览:");
@@ -550,6 +754,7 @@ async fn cmd_interactive() -> ExitCode {
         title: Some(title.clone()),
         lang: lang.label().to_string(),
         style: style.id.to_string(),
+        visual_plan: visual_plan_path.clone(),
         out: storyboard.clone(),
     });
     if split_code != ExitCode::SUCCESS {
@@ -766,7 +971,12 @@ fn cmd_split(args: &SplitArgs) -> ExitCode {
         Err(e) => return err(&e),
     };
 
-    let scenes = pipeline::plan_scenes(&story, lang, &style);
+    let visual_plan = match read_visual_plan(args.visual_plan.as_deref()) {
+        Ok(plan) => plan,
+        Err(e) => return err(&e),
+    };
+    let scenes = pipeline::plan_scenes_with_visual_plan(&story, lang, &style, visual_plan.as_ref());
+    print_visual_plan_warnings(visual_plan.as_ref(), &scenes);
     print_scenes(&scenes);
 
     let title = args.title.clone().unwrap_or_else(|| {
@@ -906,6 +1116,17 @@ fn cmd_assemble(args: &AssembleArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+async fn resolve_video_task_id(
+    client: &AgnesClient,
+    request: &CreateVideoRequest,
+    existing_task_id: Option<&str>,
+) -> Result<String, agnes::AgnesError> {
+    if let Some(task_id) = existing_task_id.filter(|task_id| !task_id.trim().is_empty()) {
+        return Ok(task_id.to_string());
+    }
+    Ok(client.create_video(request).await?.video_id)
+}
+
 async fn cmd_video(args: &VideoArgs) -> ExitCode {
     dotenvy::dotenv().ok();
 
@@ -951,8 +1172,9 @@ async fn cmd_video(args: &VideoArgs) -> ExitCode {
 
     for index in 0..storyboard.scenes.len() {
         let scene = &storyboard.scenes[index];
-        let audio_path = args.audio_dir.join(format!("{}.mp3", scene.id));
-        let video_path = args.out_dir.join(format!("{}.mp4", scene.id));
+        let scene_id = scene.id.clone();
+        let audio_path = args.audio_dir.join(format!("{}.mp3", scene_id));
+        let video_path = args.out_dir.join(format!("{}.mp4", scene_id));
 
         let audio_info = match ffprobe::probe(&audio_path) {
             Ok(info) => info,
@@ -1011,34 +1233,60 @@ async fn cmd_video(args: &VideoArgs) -> ExitCode {
             storyboard.frame_rate_video,
         );
 
-        println!(
-            "  {} 提交任务（旁白 {:.2}s → {} 帧）…",
-            scene.id, duration, num_frames
-        );
-        let task = match client.create_video(&request).await {
-            Ok(task) => task,
-            Err(e) => {
-                eprintln!("  {} 创建任务失败: {e}", scene.id);
-                failed += 1;
-                continue;
+        let existing_task_id = scene.agnes_task_id.clone();
+        let has_existing_task = existing_task_id
+            .as_deref()
+            .is_some_and(|task_id| !task_id.trim().is_empty());
+        if has_existing_task {
+            println!(
+                "  {} 复用已记录任务 {}，继续轮询…",
+                scene_id,
+                existing_task_id.as_deref().unwrap_or_default()
+            );
+        } else {
+            println!(
+                "  {} 提交任务（旁白 {:.2}s → {} 帧）…",
+                scene_id, duration, num_frames
+            );
+        }
+        let task_id =
+            match resolve_video_task_id(&client, &request, existing_task_id.as_deref()).await {
+                Ok(task_id) => task_id,
+                Err(e) => {
+                    eprintln!("  {} 创建/复用任务失败: {e}", scene_id);
+                    failed += 1;
+                    continue;
+                }
+            };
+        if !has_existing_task {
+            storyboard.scenes[index].agnes_task_id = Some(task_id.clone());
+            // 任务创建成功后立刻落盘，避免进程在轮询期间中断导致任务 ID 丢失。
+            if let Err(e) = write_storyboard(&storyboard, &args.storyboard) {
+                return err(&e);
             }
-        };
-        println!("  {} 任务 {}，开始轮询…", scene.id, task.video_id);
-        let result = match client.wait_for_video(&task.video_id).await {
+            println!("  {} 任务 {} 已保存，开始轮询…", scene_id, task_id);
+        }
+        let result = match client.wait_for_video(&task_id).await {
             Ok(result) => result,
             Err(e) => {
-                eprintln!("  {} 任务失败: {e}", scene.id);
+                if matches!(&e, agnes::AgnesError::FailedTask(_)) {
+                    storyboard.scenes[index].agnes_task_id = None;
+                    if let Err(write_error) = write_storyboard(&storyboard, &args.storyboard) {
+                        return err(&write_error);
+                    }
+                }
+                eprintln!("  {} 任务失败: {e}", scene_id);
                 failed += 1;
                 continue;
             }
         };
         if let Err(e) = client.download_video(&result.url, &video_path).await {
-            eprintln!("  {} 下载失败: {e}", scene.id);
+            eprintln!("  {} 下载失败: {e}", scene_id);
             failed += 1;
             continue;
         }
 
-        println!("  {} 完成 → {}", scene.id, video_path.display());
+        println!("  {} 完成 → {}", scene_id, video_path.display());
         let scene = &mut storyboard.scenes[index];
         scene.narration_audio = Some(audio_path.display().to_string());
         scene.motion_video = Some(video_path.display().to_string());
@@ -1073,7 +1321,12 @@ fn cmd_all(args: &AllArgs) -> ExitCode {
         Err(e) => return err(&e),
     };
 
-    let scenes = pipeline::plan_scenes(&story, lang, &style);
+    let visual_plan = match read_visual_plan(args.visual_plan.as_deref()) {
+        Ok(plan) => plan,
+        Err(e) => return err(&e),
+    };
+    let scenes = pipeline::plan_scenes_with_visual_plan(&story, lang, &style, visual_plan.as_ref());
+    print_visual_plan_warnings(visual_plan.as_ref(), &scenes);
 
     println!("═══ 分句预览（{} 场）═══", scenes.len());
     print_scenes(&scenes);
@@ -1089,17 +1342,20 @@ fn cmd_all(args: &AllArgs) -> ExitCode {
     for s in &scenes {
         println!();
         println!("{} — {}", s.id, s.caption);
+        if let Some(visual) = &s.visual {
+            println!("visual: {visual}");
+        }
         println!("{}", s.prompt.as_deref().unwrap_or_default());
-        if lang == Lang::En {
+        if lang == Lang::En && s.visual.is_none() {
             for issue in realistic::validate_scene_body(&s.caption) {
                 println!("  ⚠ {issue}");
             }
         }
     }
-    if lang == Lang::Zh {
+    if lang == Lang::Zh && visual_plan.is_none() {
         println!();
         println!(
-            "注: SCENE_BODY 为中文原句直塞（Agnes 可理解中文）；写实风格建议后续提供英文 visual_plan 以获得更稳定的画面。"
+            "注: SCENE_BODY 为中文原句直塞（Agnes 可理解中文）；写实风格建议提供英文 visual_plan 以获得更稳定的画面。"
         );
     }
 
@@ -1135,6 +1391,51 @@ fn read_story(path: &PathBuf) -> Result<String, String> {
     fs::read_to_string(path).map_err(|e| format!("读取 {} 失败: {e}", path.display()))
 }
 
+fn read_visual_plan(path: Option<&Path>) -> Result<Option<BTreeMap<String, String>>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let raw = fs::read_to_string(path)
+        .map_err(|e| format!("读取 visual_plan {} 失败: {e}", path.display()))?;
+    let plan: BTreeMap<String, String> = serde_json::from_str(&raw).map_err(|e| {
+        format!(
+            "解析 visual_plan {} 失败（需要 JSON 对象：场景 ID → 描述）: {e}",
+            path.display()
+        )
+    })?;
+    for (scene_id, visual) in &plan {
+        if scene_id.trim().is_empty() {
+            return Err(format!("visual_plan {} 包含空场景 ID", path.display()));
+        }
+        if visual.trim().is_empty() {
+            return Err(format!(
+                "visual_plan {} 中场景 {} 的画面描述不能为空",
+                path.display(),
+                scene_id
+            ));
+        }
+    }
+    Ok(Some(plan))
+}
+
+fn print_visual_plan_warnings(
+    visual_plan: Option<&BTreeMap<String, String>>,
+    scenes: &[models::Scene],
+) {
+    let Some(visual_plan) = visual_plan else {
+        return;
+    };
+    for scene_id in visual_plan.keys() {
+        let short_id = scene_id.strip_prefix('s').unwrap_or(scene_id);
+        let matched = scenes
+            .iter()
+            .any(|scene| scene.id == *scene_id || scene.id == format!("s{short_id}"));
+        if !matched {
+            println!("⚠ visual_plan 中的场景 {} 没有对应分句，将被忽略", scene_id);
+        }
+    }
+}
+
 fn read_storyboard(path: &PathBuf) -> Result<Storyboard, String> {
     let raw = fs::read_to_string(path).map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
     serde_json::from_str(&raw).map_err(|e| format!("解析 {} 失败: {e}", path.display()))
@@ -1163,6 +1464,151 @@ mod tests {
         assert_eq!(sanitize_title(" 旅行 "), "旅行");
     }
 
+    #[test]
+    fn visual_plan_parser_validates_descriptions() {
+        let path = std::env::temp_dir().join(format!(
+            "agnes-video-free-visual-plan-{}.json",
+            std::process::id()
+        ));
+        fs::write(&path, r#"{"s01":"a woman walking in the rain"}"#).unwrap();
+        let plan = read_visual_plan(Some(&path)).unwrap().unwrap();
+        assert_eq!(
+            plan.get("s01").map(String::as_str),
+            Some("a woman walking in the rain")
+        );
+
+        fs::write(&path, r#"{"s01":"   "}"#).unwrap();
+        assert!(read_visual_plan(Some(&path)).is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn persisted_task_id_reuses_task_without_create_request() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/videos"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/agnesapi"))
+            .and(query_param("video_id", "task-existing"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "video_id": "task-existing",
+                "status": "completed",
+                "url": "https://cdn.example/video.mp4"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = AgnesClient::with_options(
+            "test-key",
+            &server.uri(),
+            AgnesOptions {
+                poll_interval: std::time::Duration::from_millis(1),
+                poll_timeout: std::time::Duration::from_secs(2),
+                ..AgnesOptions::default()
+            },
+        )
+        .unwrap();
+        let request = CreateVideoRequest::new("prompt", "negative", 720, 1280, 121, 24);
+        let scene = models::Scene {
+            id: "s01".to_string(),
+            caption: "测试。".to_string(),
+            narration: "测试。".to_string(),
+            visual: None,
+            prompt: Some("prompt".to_string()),
+            negative_prompt: Some("negative".to_string()),
+            narration_audio: None,
+            motion_video: None,
+            agnes_task_id: Some("task-existing".to_string()),
+            duration_sec: None,
+            num_frames: None,
+        };
+
+        let task_id = resolve_video_task_id(&client, &request, scene.agnes_task_id.as_deref())
+            .await
+            .unwrap();
+        assert_eq!(task_id, "task-existing");
+        let result = client.wait_for_video(&task_id).await.unwrap();
+        assert_eq!(result.url, "https://cdn.example/video.mp4");
+    }
+
+    #[test]
+    fn clean_removes_one_scene_and_updates_storyboard() {
+        let root =
+            std::env::temp_dir().join(format!("agnes-video-free-clean-{}", std::process::id()));
+        let audio_dir = root.join("audio");
+        let video_dir = root.join("video");
+        let output = root.join("out/story.mp4");
+        let clip = output.parent().unwrap().join(".agnes-video-free/s01.mp4");
+        fs::create_dir_all(&audio_dir).unwrap();
+        fs::create_dir_all(&video_dir).unwrap();
+        fs::create_dir_all(clip.parent().unwrap()).unwrap();
+        fs::create_dir_all(output.parent().unwrap()).unwrap();
+
+        let storyboard_path = root.join("storyboard.json");
+        let storyboard = Storyboard {
+            title: "clean-test".to_string(),
+            lang: "zh".to_string(),
+            style: "realistic-cinematic".to_string(),
+            width: 720,
+            height: 1280,
+            fps: 30,
+            frame_rate_video: 24,
+            scenes: vec![models::Scene {
+                id: "s01".to_string(),
+                caption: "测试场景。".to_string(),
+                narration: "测试场景。".to_string(),
+                visual: None,
+                prompt: Some("prompt".to_string()),
+                negative_prompt: Some("negative".to_string()),
+                narration_audio: Some("audio/s01.mp3".to_string()),
+                motion_video: Some("video/s01.mp4".to_string()),
+                agnes_task_id: Some("task_s01".to_string()),
+                duration_sec: Some(2.0),
+                num_frames: Some(49),
+            }],
+        };
+        fs::write(&storyboard_path, serde_json::to_vec(&storyboard).unwrap()).unwrap();
+        fs::write(audio_dir.join("s01.mp3"), [1_u8]).unwrap();
+        fs::write(video_dir.join("s01.mp4"), [1_u8]).unwrap();
+        fs::write(&clip, [1_u8]).unwrap();
+
+        let code = cmd_clean(&CleanArgs {
+            storyboard: storyboard_path.clone(),
+            scene: "s01".to_string(),
+            stage: CleanStage::All,
+            audio_dir,
+            video_dir,
+            output,
+            dry_run: false,
+            yes: true,
+        });
+        assert_eq!(code, ExitCode::SUCCESS);
+        let updated: Storyboard =
+            serde_json::from_slice(&fs::read(&storyboard_path).unwrap()).unwrap();
+        assert!(updated.scenes[0].narration_audio.is_none());
+        assert!(updated.scenes[0].motion_video.is_none());
+        assert!(updated.scenes[0].agnes_task_id.is_none());
+        assert!(updated.scenes[0].duration_sec.is_none());
+        assert!(updated.scenes[0].num_frames.is_none());
+        assert!(!clip.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clean_rejects_path_like_scene_ids() {
+        assert!(!safe_scene_id("../s01"));
+        assert!(!safe_scene_id("s/01"));
+        assert!(safe_scene_id("s01"));
+    }
+
     #[tokio::test]
     async fn resume_skips_completed_media_without_api_request() {
         let root =
@@ -1186,10 +1632,12 @@ mod tests {
                 id: "s01".to_string(),
                 caption: "测试场景。".to_string(),
                 narration: "测试场景。".to_string(),
+                visual: None,
                 prompt: Some("prompt".to_string()),
                 negative_prompt: Some("negative".to_string()),
                 narration_audio: None,
                 motion_video: None,
+                agnes_task_id: None,
                 duration_sec: None,
                 num_frames: None,
             }],

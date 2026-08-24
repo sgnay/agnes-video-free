@@ -15,7 +15,7 @@ description: 使用 Agnes Video V2.0、Rust edge-tts 和 ffmpeg 将中文或英�
 - TTS 使用 Rust 原生 edge-tts，不需要 Agnes API Key；视频生成和下载才需要 Key。
 - 生成任务可能耗时很长。默认串行处理，不能通过重复提交来“催进度”。
 - 中断后先运行 `status`，再运行 `resume`；不要删除有效的 mp3/mp4。
-- 只有用户明确要求时，才删除单个损坏素材并重新生成。
+- 只有用户明确要求时，才使用 `clean --scene ... --yes` 删除单个损坏素材并重新生成；优先先用 `--dry-run`。
 
 ## 前置条件
 
@@ -48,6 +48,7 @@ $BIN all story.txt \
   --title "我的故事" \
   --lang zh \
   --style realistic-cinematic \
+  --visual-plan examples/visual_plan.example.json \
   --dry-run
 ```
 
@@ -57,7 +58,7 @@ $BIN all story.txt \
 - `realistic-vlog`：小红书，1080×1440，生活 vlog
 - `realistic-documentary`：微博，1280×720，纪录片
 
-检查分句是否合理。当前没有 `visual_plan.json` 接入时，场景 prompt 会把分句原文作为 `SCENE_BODY`；如需更稳定的写实画面，应先把故事句子改写成具体的“主体 + 环境 + 动作 + 光线 + 镜头”描述。
+检查分句是否合理。提供 `visual_plan.json` 后，匹配场景的英文描述会作为 `SCENE_BODY`；未匹配场景仍使用分句原文。写实画面描述应包含具体的“主体 + 环境 + 动作 + 光线 + 镜头”。
 
 ### 2. 创建或更新 storyboard
 
@@ -66,10 +67,11 @@ $BIN split story.txt \
   --title "我的故事" \
   --lang zh \
   --style realistic-cinematic \
+  --visual-plan examples/visual_plan.example.json \
   --out storyboard.json
 ```
 
-`split` 会覆盖指定的 storyboard 输出文件。若已有项目正在生成，不要对同一个 storyboard 重新 `split`，否则会丢失原有场景的素材字段。
+`split` 会覆盖指定的 storyboard 输出文件。若已有项目正在生成，不要对同一个 storyboard 重新 `split`，否则会丢失原有场景的素材字段。visual plan 使用 JSON 对象格式，key 支持 `s01` 或 `01`；空描述和非法 JSON 会直接报错，未对应分句的 key 会给出警告。
 
 ### 3. 生成旁白
 
@@ -94,7 +96,7 @@ $BIN video \
   --out-dir assets/videos
 ```
 
-每个场景的旁白时长由 `ffprobe` 测量，并据此计算满足 `8n+1` 的 `num_frames`。有效的、超过 20 KB 的 mp4 会自动跳过。默认轮询间隔为 8 秒，单段最长等待 900 秒。
+每个场景的旁白时长由 `ffprobe` 测量，并据此计算满足 `8n+1` 的 `num_frames`。任务创建成功后会立即将 `agnes_task_id` 写入 storyboard；有效的、超过 20 KB 的 mp4 会自动跳过。默认轮询间隔为 8 秒，单段最长等待 900 秒。
 
 可在测试或特殊服务端场景覆盖：
 
@@ -138,7 +140,7 @@ $BIN resume \
 `resume` 的行为：
 
 1. 缺少旁白时执行 TTS，已有有效旁白跳过；
-2. 缺少视频时执行 Agnes 生成，已有有效视频跳过；如果视频已经齐全，不会请求 Agnes API；
+2. 缺少视频时优先使用 storyboard 中的 `agnes_task_id` 继续轮询，只有没有任务 ID 时才创建新任务；已有有效视频跳过；如果视频已经齐全，不会请求 Agnes API；
 3. 最终成片已存在且有效时跳过组装，否则执行 `assemble`；
 4. 任一阶段失败都会保留之前已经完成的产物，下一次可再次运行 `resume`。
 
@@ -152,6 +154,22 @@ $BIN assemble \
   --fonts-dir assets/fonts \
   --output out/story.mp4
 ```
+
+### 7. 安全清理单个场景
+
+先预览待删除目标：
+
+```bash
+$BIN clean --scene s01 --stage all --dry-run
+```
+
+确认后再删除：
+
+```bash
+$BIN clean --scene s01 --stage all --yes
+```
+
+`--stage` 可选 `audio`、`video`、`clip` 或 `all`。命令必须指定单个场景 ID，拒绝路径穿越字符；不删除最终成片，只同步清理 storyboard 中已删除素材的状态。清理 `audio` 或 `video` 时会同时清理依赖它们的临时 clip；删除后运行 `resume` 会重新生成缺失阶段并覆盖旧成片，若只删除 `clip` 则可直接运行 `assemble`。
 
 ## 交互模式
 

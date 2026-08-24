@@ -18,6 +18,7 @@ nix run .# -- all story.txt \
   --title "我的故事" \
   --lang zh \
   --style realistic-cinematic \
+  --visual-plan examples/visual_plan.example.json \
   --dry-run
 
 # 1. 创建 storyboard
@@ -25,6 +26,7 @@ nix run .# -- split story.txt \
   --title "我的故事" \
   --lang zh \
   --style realistic-cinematic \
+  --visual-plan examples/visual_plan.example.json \
   --out storyboard.json
 
 # 2. 旁白
@@ -79,7 +81,9 @@ nix run .# -- resume \
   --output out/story.mp4
 ```
 
-`resume` 会根据文件是否存在以及文件大小判定阶段，不依赖独立数据库。视频文件必须至少 20 KB；旁白和临时 clip 必须是非空文件。
+`resume` 会根据文件是否存在以及文件大小判定阶段，不依赖独立数据库；视频任务创建后的 `agnes_task_id` 同时保存在 storyboard 中。视频文件必须至少 20 KB；旁白和临时 clip 必须是非空文件。
+
+visual plan 示例见 `examples/visual_plan.example.json`。它只影响 `split/all` 生成的场景 prompt，不会改变 TTS 旁白文本或字幕内容。
 
 ## 失败处理
 
@@ -90,6 +94,22 @@ nix run .# -- resume \
 ```bash
 nix run .# -- tts --storyboard storyboard.json
 ```
+
+### 清理单个损坏场景
+
+清理前先预览：
+
+```bash
+nix run .# -- clean --scene s07 --stage all --dry-run
+```
+
+确认目标无误后执行：
+
+```bash
+nix run .# -- clean --scene s07 --stage all --yes
+```
+
+只删除特定阶段时可将 `--stage` 改为 `audio`、`video` 或 `clip`；清理 `audio`/`video` 会同时清理依赖它们的临时 clip。最终成片始终保留；删除音频或视频后用 `resume` 重新生成并组装，删除临时 clip 后用 `assemble` 即可。
 
 ### Agnes 单段失败
 

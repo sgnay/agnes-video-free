@@ -3,27 +3,47 @@
 //! M0 覆盖「分句 → scenes → prompt 预览 → storyboard.json」；TTS / 视频生成 /
 //! 成片组装分别在 M1 / M2 接入。供子命令、交互模式、agent skill 共用。
 
+use std::collections::BTreeMap;
+
 use crate::models::{Lang, Scene, Storyboard, StyleProfile};
 use crate::split::split_story;
 
-/// 分句并为每场拼三段式 prompt。
-///
-/// M0 的 SCENE_BODY 为原句直塞（尚无 visual_plan 支持）：中文原句 Agnes 可直接理解；
-/// 英文建议后续提供 visual_plan 以获得更稳定的画面。
+/// 分句并为每场拼三段式 prompt；没有 visual plan 时兼容使用原句。
 pub fn plan_scenes(story: &str, lang: Lang, style: &StyleProfile) -> Vec<Scene> {
+    plan_scenes_with_visual_plan(story, lang, style, None)
+}
+
+/// 分句并使用可选 visual plan 覆盖每场的 `SCENE_BODY`。
+///
+/// visual plan 的 key 可以是 `s01` 或 `01`；未匹配的场景继续使用分句原文。
+pub fn plan_scenes_with_visual_plan(
+    story: &str,
+    lang: Lang,
+    style: &StyleProfile,
+    visual_plan: Option<&BTreeMap<String, String>>,
+) -> Vec<Scene> {
     split_story(story, lang)
         .into_iter()
         .enumerate()
         .map(|(i, caption)| {
-            let prompt = style.build_prompt(&caption);
+            let id = format!("s{:02}", i + 1);
+            let visual = visual_plan.and_then(|plan| {
+                plan.get(&id)
+                    .or_else(|| plan.get(id.trim_start_matches('s')))
+            });
+            let visual = visual.map(|value| value.trim().to_string());
+            let visual = visual.filter(|value| !value.is_empty());
+            let prompt = style.build_prompt(visual.as_deref().unwrap_or(&caption));
             Scene {
-                id: format!("s{:02}", i + 1),
+                id,
                 caption: caption.clone(),
                 narration: caption,
+                visual,
                 prompt: Some(prompt),
                 negative_prompt: Some(style.negative.clone()),
                 narration_audio: None,
                 motion_video: None,
+                agnes_task_id: None,
                 duration_sec: None,
                 num_frames: None,
             }
@@ -63,6 +83,7 @@ mod tests {
         assert_eq!(scenes[0].id, "s01");
         assert_eq!(scenes[0].caption, "下雨天。");
         assert_eq!(scenes[0].narration, "下雨天。");
+        assert!(scenes[0].visual.is_none());
 
         let prompt = scenes[0].prompt.as_deref().unwrap();
         assert!(prompt.starts_with("cinematic realism"));
@@ -72,6 +93,30 @@ mod tests {
             scenes[0].negative_prompt.as_deref(),
             Some(style.negative.as_str())
         );
+    }
+
+    #[test]
+    fn visual_plan_overrides_scene_body_and_accepts_short_ids() {
+        let style = styles::by_id("realistic-cinematic").unwrap();
+        let mut plan = BTreeMap::new();
+        plan.insert(
+            "01".to_string(),
+            "a woman walking through a rainy neon alley at night, slow tracking shot".to_string(),
+        );
+        let scenes = plan_scenes_with_visual_plan(
+            "下雨天。我在巷口捡到一只橘猫。",
+            Lang::Zh,
+            &style,
+            Some(&plan),
+        );
+        assert_eq!(
+            scenes[0].visual.as_deref(),
+            Some("a woman walking through a rainy neon alley at night, slow tracking shot")
+        );
+        let prompt = scenes[0].prompt.as_deref().unwrap();
+        assert!(prompt.contains("a woman walking through a rainy neon alley"));
+        assert!(!prompt.contains("下雨天。"));
+        assert!(scenes[1].visual.is_none());
     }
 
     #[test]

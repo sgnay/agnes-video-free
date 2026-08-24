@@ -25,16 +25,18 @@ agnes-video-free interactive
 
 向导会让你选择风格、语言、故事来源（文件或多行粘贴）、音色和语速；随后展示分句和首场 prompt 预览，确认后依次执行 `split → tts → video → assemble`。
 默认产物为 `storyboard.json`、`audio/narration/`、`assets/videos/` 和 `out/<标题>.mp4`；输入 `q` 可取消配置。
-已有 mp3/mp4 会自动跳过，已完成的文件会保留，便于后续手动重跑子命令。
+已有 mp3/mp4 会自动跳过，已完成的文件会保留，便于后续手动重跑子命令。视频任务创建后会立即把 `agnes_task_id` 写入 storyboard，程序中断时可继续轮询原任务。
 
 需要脚本或 Agent 调用时，仍可使用以下子命令：
 
 ```bash
 # ① 分句 + 预览 prompt（不请求任何生成 API）
-agnes-video-free all examples/story_realistic.txt --dry-run
+agnes-video-free all examples/story_realistic.txt \\
+  --visual-plan examples/visual_plan.example.json --dry-run
 
-# ② 分句 → storyboard.json
-agnes-video-free split examples/story_realistic.txt
+# ② 分句 → storyboard.json（visual_plan 可选）
+agnes-video-free split examples/story_realistic.txt \\
+  --visual-plan examples/visual_plan.example.json
 
 # ③ 生成旁白 mp3（edge-tts，免费；已存在的自动跳过）
 agnes-video-free tts
@@ -48,14 +50,19 @@ agnes-video-free assemble --fonts-dir assets/fonts --output out/story.mp4
 # 查看每场状态
 agnes-video-free status
 
-# 中断后继续：只补齐缺失阶段，不重复请求已完成素材
+# 中断后继续：只补齐缺失阶段，不重复请求已完成素材或已记录任务
 agnes-video-free resume --output out/story.mp4
+
+# 安全清理单个场景（先预览，实际删除需显式 --yes）
+agnes-video-free clean --scene s01 --dry-run
+agnes-video-free clean --scene s01 --stage all --yes
 
 # 输出：out/story.mp4（H.264 + AAC，字幕已烧录）
 ```
 
 风格：`realistic-cinematic`（TikTok 9:16）/ `realistic-vlog`（小红书 3:4）/
 `realistic-documentary`（微博 16:9）。配方见 [references/prompt-recipes.md](references/prompt-recipes.md)。
+`visual_plan.json` 示例见 [examples/visual_plan.example.json](examples/visual_plan.example.json)，用于为场景提供英文画面描述。
 Agent 调用契约见 [SKILL.md](SKILL.md) 和 [references/agent-workflow.md](references/agent-workflow.md)。
 
 ## NixOS 打包与运行
@@ -111,4 +118,4 @@ references/        # prompt 配方 / Agent 调用与流程细节
 - M0 ✅ 脚手架、clap 子命令、中英文分句、dry-run 预览
 - M1 🚧 TTS ✅；ffprobe 封装 + Agnes 视频 API 客户端 ✅；真实视频生成需配置 `AGNES_API_KEY` 后运行 `video`
 - M2 ✅ 成片组装（ffmpeg + libass：场景封装、concat、ASS 字幕、画幅校验）
-- M3 🚧 交互式向导 ✅；`status` / `resume` ✅；Agent Skill ✅；`clean`、visual_plan 支持待实现；M4 GUI
+- M3 🚧 交互式向导 ✅；`status` / `resume` / `clean` ✅；Agent Skill ✅；visual_plan ✅；M4 GUI

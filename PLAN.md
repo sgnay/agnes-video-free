@@ -159,6 +159,7 @@ agnes-video-free/
       "negative_prompt": "…",
       "narration_audio": "audio/narration/s01.mp3",
       "motion_video": "assets/videos/s01.mp4",
+      "agnes_task_id": "task_xxx", // 创建后立即持久化，支持中断后继续轮询
       "duration_sec": 4.82,       // ffprobe 实测
       "num_frames": 121
     }
@@ -312,7 +313,7 @@ CGI artifacts, distorted faces, extra limbs, flickering
 
 ### 6.3 轮询与容错
 
-- 状态机：`queued → in_progress → completed | failed`。
+- 状态机：`pending/submitted/queued → running/in_progress/processing → completed | failed`；排队和处理中状态均继续轮询。
 - 间隔 8s，单段最长等 15 分钟（`POLL_MAX_WAIT_SEC = 900`）。
 - **429**：等 65s 重试（免费 key 限流 1 req/min）；**500/502/503/504**：指数退避 5/10/20/40s。
 - **完成时 URL 解析兼容**：文档标准为 `metadata.url`，原项目实测中国站为顶层 `url` → 优先 `metadata.url`，回退顶层 `url`。
@@ -467,7 +468,7 @@ pending → tts_done → video_done → clip_done → assembled
 - [x] `tts` 子命令：读 storyboard → 逐场合成 `audio/narration/sXX.mp3`（幂等跳过 + 重试自愈 + `--voice/--gender/--speed`）
 - [x] ffprobe 封装（`src/media/ffprobe.rs`：时长/视频尺寸 JSON 探测）+ 旁白时长驱动帧数
 - [x] AgnesClient（`src/agnes.rs`）：`POST /v1/videos` 创建、`GET /agnesapi?video_id=` 轮询、下载、429/5xx 退避、`metadata.url` / 顶层 `url` 兼容
-- [x] `video` 子命令 + 断点续跑：已有有效 MP4 自动跳过；每场成功后立即更新 storyboard
+- [x] `video` 子命令 + 断点续跑：已有有效 MP4 自动跳过；任务创建后立即持久化 `agnes_task_id`，中断后优先继续原任务轮询
 - [x] wiremock 集成测试：请求路径、Bearer、任务创建→完成→CDN 下载链路
 - [ ] 真实 API 跑通 2-3 句 demo，产出 `assets/videos/sXX.mp4`（需用户提供/配置有效 `AGNES_API_KEY`）
 - **客户端验收**：本地 cargo/nix 测试通过；真实 API demo 待配置 key 后执行
@@ -483,13 +484,13 @@ pending → tts_done → video_done → clip_done → assembled
 - [x] 交互式向导全流程：无子命令或 `interactive` 进入，选择 realistic 风格/语言/音色/语速/输出目录，支持读取文件或多行粘贴，预览后执行 `split → tts → video → assemble`；输入 `q` 可取消，已有素材自动复用
 - [x] realistic 风格族三档（cinematic/vlog/documentary）+ 平台预设
 - [ ] textbook 简化方案评估（教学卡用 ASS 模拟 or 降级为字幕，决策后实现）
-- [x] SKILL.md + references 文档（`resume/status` 已实现）
-- [ ] `clean`：按场景安全清理素材
+- [x] SKILL.md + references 文档（`resume/status/clean` 已实现）
+- [x] `clean`：单场景、分阶段、dry-run/显式确认、路径安全校验与 storyboard 状态同步（清理视频时同步清除 `agnes_task_id`）
 - **验收**：三种模式（交互/子命令/skill）均能从同一 story.txt 产出 TikTok/小红书/微博 三平台成片
 
 **当前交互向导行为**：风格档案自带推荐平台和画幅；向导先读取故事并展示分句/首场 prompt，用户确认后才创建 `storyboard.json` 并启动网络生成。每一步复用现有子命令，失败时保留已完成产物；独立平台覆盖和场景编辑留待后续迭代。
 
-**当前 Agent Skill 行为**：`SKILL.md` 规定先 dry-run、再分句/TTS/视频/组装，并要求 Agent 在每阶段报告产物与下一步；`references/agent-workflow.md` 提供可复制命令和基于 `status` 的恢复决策表。
+**当前 Agent Skill 行为**：`SKILL.md` 规定先 dry-run、再分句/TTS/视频/组装，并要求 Agent 在每阶段报告产物与下一步；`references/agent-workflow.md` 提供可复制命令和基于 `status` 的恢复决策表。`clean` 默认只预览，必须使用 `--yes` 才会删除单场景素材。
 
 ### M4 — GUI + 发布（未来）
 - [x] **NixOS Flake 打包**（提前完成）：`flake.nix` / `shell.nix` / `flake.lock`，参照 simple-translation 方式，`rustPlatform.buildRustPackage` + cargoLock，运行时注入 ffmpeg PATH / `SSL_CERT_FILE` / 随包字体 `AGNES_VIDEO_FREE_FONTS`；`nix build` 与 `nix run .#` 实测通过
@@ -507,6 +508,9 @@ pending → tts_done → video_done → clip_done → assembled
 | 集成（wiremock） | Agnes 创建/轮询/失败/429 重试/下载、edge-tts 失败重试（mock 网络层） |
 | E2E 冒烟 | 真实 API + 系统 ffmpeg，短故事全流程（标记 `--ignored` 默认不跑） |
 | 手工验收 | 音画同步 <0.5s、字幕 ≤3 行、素材 >20KB、resume 中断恢复 |
+
+**下一步测试任务**：
+- [ ] 增加 429 限流自动重试测试，验证客户端在收到限流响应时使用退避策略，并且不会丢失已持久化的任务状态。
 
 ---
 

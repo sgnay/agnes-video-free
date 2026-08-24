@@ -147,7 +147,10 @@ pub struct Scene {
     pub caption: String,
     /// 送入 TTS 的文本。
     pub narration: String,
-    /// 最终三段式 prompt（M0 起由 pipeline 生成）。
+    /// 可选的结构化英文画面描述；存在时优先作为 prompt 的 SCENE_BODY。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visual: Option<String>,
+    /// 最终三段式 prompt（由 pipeline 生成）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// 负向词。
@@ -159,6 +162,9 @@ pub struct Scene {
     /// Agnes 视频文件路径（相对工作区）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion_video: Option<String>,
+    /// Agnes 异步任务 ID；任务创建后立即持久化，便于中断后继续轮询。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agnes_task_id: Option<String>,
     /// ffprobe 实测旁白时长。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_sec: Option<f64>,
@@ -212,6 +218,22 @@ mod tests {
             assert!((41..=441).contains(&n), "帧数越界: {n}");
             assert_eq!((n - 1) % 8, 0, "帧数 {n} 不满足 8n+1");
         }
+    }
+
+    #[test]
+    fn agnes_task_id_round_trips_and_old_scene_json_stays_compatible() {
+        let old_scene: Scene = serde_json::from_value(serde_json::json!({
+            "id": "s01",
+            "caption": "测试。",
+            "narration": "测试。"
+        }))
+        .unwrap();
+        assert!(old_scene.agnes_task_id.is_none());
+
+        let mut scene = old_scene;
+        scene.agnes_task_id = Some("task_123".to_string());
+        let value = serde_json::to_value(scene).unwrap();
+        assert_eq!(value["agnes_task_id"], "task_123");
     }
 
     #[test]

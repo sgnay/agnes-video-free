@@ -227,7 +227,7 @@ impl AgnesClient {
         Ok(VideoTask { video_id })
     }
 
-    /// 轮询任务直到 completed / failed / 超时。
+    /// 轮询任务直到 completed / failed / 超时；pending 等排队状态会继续等待。
     pub async fn wait_for_video(&self, video_id: &str) -> Result<VideoResult, AgnesError> {
         let started = Instant::now();
         loop {
@@ -257,12 +257,28 @@ impl AgnesClient {
                         .unwrap_or_else(|| "未提供错误详情".to_string());
                     return Err(AgnesError::FailedTask(reason));
                 }
-                "queued" | "in_progress" | "processing" => {
+                status if Self::is_processing_status(status) => {
                     tokio::time::sleep(self.options.poll_interval).await;
                 }
-                other => return Err(AgnesError::FailedTask(format!("未知任务状态「{other}」"))),
+                other => {
+                    let detail = response
+                        .error
+                        .map(|error| format!("，error={error}"))
+                        .unwrap_or_default();
+                    return Err(AgnesError::FailedTask(format!(
+                        "未知任务状态「{other}」（video_id={video_id}{detail}）"
+                    )));
+                }
             }
         }
+    }
+
+    /// 判断任务是否仍在排队或处理中。
+    fn is_processing_status(status: &str) -> bool {
+        matches!(
+            status,
+            "pending" | "submitted" | "queued" | "running" | "in_progress" | "processing"
+        )
     }
 
     /// 查询一次任务状态（内部也公开，便于 status 命令与测试）。
@@ -365,11 +381,86 @@ mod tests {
     }
 
     #[test]
+    fn pending_and_running_statuses_are_pollable() {
+        for status in [
+            "pending",
+            "submitted",
+            "queued",
+            "running",
+            "in_progress",
+            "processing",
+        ] {
+            assert!(
+                AgnesClient::is_processing_status(status),
+                "状态未识别: {status}"
+            );
+        }
+        assert!(!AgnesClient::is_processing_status("failed"));
+        assert!(!AgnesClient::is_processing_status("completed"));
+    }
+
+    #[test]
     fn options_have_documented_defaults() {
         let options = AgnesOptions::default();
         assert_eq!(options.poll_interval, Duration::from_secs(8));
         assert_eq!(options.poll_timeout, Duration::from_secs(900));
         assert_eq!(options.retry_429_delay, Duration::from_secs(65));
+    }
+
+    #[tokio::test]
+    async fn pending_status_is_polled_until_completed() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+        struct PendingThenCompleted {
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl Respond for PendingThenCompleted {
+            fn respond(&self, _request: &Request) -> ResponseTemplate {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "video_id": "video-pending",
+                        "status": "pending"
+                    }))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "video_id": "video-pending",
+                        "status": "completed",
+                        "metadata": {"url": "https://cdn.example/video-pending.mp4"}
+                    }))
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/agnesapi"))
+            .and(query_param("video_id", "video-pending"))
+            .respond_with(PendingThenCompleted {
+                calls: Arc::clone(&calls),
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let client = AgnesClient::with_options(
+            "test-key",
+            &server.uri(),
+            AgnesOptions {
+                poll_interval: Duration::from_millis(1),
+                poll_timeout: Duration::from_secs(2),
+                ..AgnesOptions::default()
+            },
+        )
+        .unwrap();
+        let result = client.wait_for_video("video-pending").await.unwrap();
+        assert_eq!(result.url, "https://cdn.example/video-pending.mp4");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
