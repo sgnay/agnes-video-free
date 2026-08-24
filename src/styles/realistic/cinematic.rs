@@ -32,7 +32,7 @@ pub fn profile() -> StyleProfile {
         subtitle: SubtitleStyle {
             font: "Source Han Sans SC",
             font_file: "SourceHanSansSC-Regular.otf",
-            size: 40,   // 720 宽基准
+            size: 40, // 720 宽基准
             outline: 3,
             color: "&H00FFFFFF",
             outline_color: "&H00000000",

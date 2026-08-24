@@ -13,7 +13,8 @@ const STYLE_DNA: &str = "realistic documentary footage, photorealistic live-acti
 const MOTION_FOOTER: &str = "natural realistic motion, slow steady camera pan or tilt, natural subject movement, realistic physics, no morphing, no warping, no added text, settle naturally";
 
 /// 风格专属负向词（拼在共享基线之后；防止纪录片变舞台感/慢动作）。
-const NEGATIVE_EXTRA: &str = "dramatic stage lighting, heavy color grade, cinematic slow-motion feel";
+const NEGATIVE_EXTRA: &str =
+    "dramatic stage lighting, heavy color grade, cinematic slow-motion feel";
 
 /// 画幅（宽, 高）：1280×720 = 16:9 横屏。
 const CANVAS: (u32, u32) = (1280, 720);
@@ -32,7 +33,7 @@ pub fn profile() -> StyleProfile {
         subtitle: SubtitleStyle {
             font: "Source Han Sans SC",
             font_file: "SourceHanSansSC-Regular.otf",
-            size: 36,   // 720 宽基准（横屏）
+            size: 36, // 720 宽基准（横屏）
             outline: 3,
             color: "&H00FFFFFF",
             outline_color: "&H00000000",

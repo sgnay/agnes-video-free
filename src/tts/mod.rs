@@ -80,21 +80,29 @@ impl fmt::Display for TtsError {
 
 impl std::error::Error for TtsError {}
 
+/// 合成参数（text + 音色 + 语速 + 语言标签）。
+pub struct TtsParams<'a> {
+    pub text: &'a str,
+    pub voice: &'a str,
+    pub rate: &'a str,
+    pub lang: &'a str,
+}
+
 /// 带重试的合成：网络抖动（连接重置等瞬时错误）时最多重试 `max_attempts` 次，
 /// 间隔 `backoff_secs` 秒。已写出的 mp3 不会重写（写入只发生在成功后）。
 pub async fn synthesize_with_retry<P: TtsProvider>(
     provider: &P,
-    text: &str,
-    voice: &str,
-    rate: &str,
-    lang: &str,
+    params: TtsParams<'_>,
     out: &Path,
     max_attempts: u32,
     backoff_secs: u64,
 ) -> Result<(), TtsError> {
     let mut last_err = None;
     for attempt in 1..=max_attempts {
-        match provider.synthesize(text, voice, rate, lang, out).await {
+        match provider
+            .synthesize(params.text, params.voice, params.rate, params.lang, out)
+            .await
+        {
             Ok(()) => return Ok(()),
             Err(e) => {
                 last_err = Some(e);
@@ -123,9 +131,18 @@ mod tests {
 
     #[test]
     fn default_voices_by_lang_and_gender() {
-        assert_eq!(default_voice_with_gender(Lang::Zh, false), "zh-CN-XiaoyiNeural");
-        assert_eq!(default_voice_with_gender(Lang::Zh, true), "zh-CN-YunxiNeural");
-        assert_eq!(default_voice_with_gender(Lang::En, false), "en-US-JennyNeural");
+        assert_eq!(
+            default_voice_with_gender(Lang::Zh, false),
+            "zh-CN-XiaoyiNeural"
+        );
+        assert_eq!(
+            default_voice_with_gender(Lang::Zh, true),
+            "zh-CN-YunxiNeural"
+        );
+        assert_eq!(
+            default_voice_with_gender(Lang::En, false),
+            "en-US-JennyNeural"
+        );
         assert_eq!(default_voice_with_gender(Lang::En, true), "en-US-GuyNeural");
         assert_eq!(lang_tag(Lang::Zh), "zh-CN");
         assert_eq!(lang_tag(Lang::En), "en-US");

@@ -12,7 +12,10 @@ use clap::{Args, Parser, Subcommand};
 
 use models::{Lang, Storyboard};
 use styles::realistic;
-use tts::{default_voice_with_gender, lang_tag, rate_from_speed, synthesize_with_retry, EdgeTtsProvider};
+use tts::{
+    EdgeTtsProvider, TtsParams, default_voice_with_gender, lang_tag, rate_from_speed,
+    synthesize_with_retry,
+};
 
 #[derive(Parser)]
 #[command(
@@ -211,10 +214,16 @@ async fn cmd_tts(args: &TtsArgs) -> ExitCode {
     let lang = lang_tag(lang);
 
     if let Err(e) = fs::create_dir_all(&args.out_dir) {
-        return err(&format!("创建输出目录 {} 失败: {e}", args.out_dir.display()));
+        return err(&format!(
+            "创建输出目录 {} 失败: {e}",
+            args.out_dir.display()
+        ));
     }
 
-    println!("TTS: 音色 {voice}，语速 {rate}，共 {} 场\n", sb.scenes.len());
+    println!(
+        "TTS: 音色 {voice}，语速 {rate}，共 {} 场\n",
+        sb.scenes.len()
+    );
     let provider = EdgeTtsProvider;
     let (mut done, mut skipped, mut failed) = (0, 0, 0);
 
@@ -226,7 +235,19 @@ async fn cmd_tts(args: &TtsArgs) -> ExitCode {
             continue;
         }
         print!("  合成 {} … ", scene.id);
-        match synthesize_with_retry(&provider, &scene.narration, &voice, &rate, lang, &out, 3, 1).await
+        match synthesize_with_retry(
+            &provider,
+            TtsParams {
+                text: &scene.narration,
+                voice: &voice,
+                rate: &rate,
+                lang,
+            },
+            &out,
+            3,
+            1,
+        )
+        .await
         {
             Ok(()) => {
                 println!("✓ {}", out.display());
@@ -287,7 +308,9 @@ fn cmd_all(args: &AllArgs) -> ExitCode {
     }
     if lang == Lang::Zh {
         println!();
-        println!("注: SCENE_BODY 为中文原句直塞（Agnes 可理解中文）；写实风格建议后续提供英文 visual_plan 以获得更稳定的画面。");
+        println!(
+            "注: SCENE_BODY 为中文原句直塞（Agnes 可理解中文）；写实风格建议后续提供英文 visual_plan 以获得更稳定的画面。"
+        );
     }
 
     if args.dry_run {

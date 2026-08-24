@@ -64,7 +64,10 @@ mod tests {
         assert!(prompt.starts_with("cinematic realism"));
         assert!(prompt.contains("下雨天。"));
         assert!(prompt.ends_with(style.motion_footer));
-        assert_eq!(scenes[0].negative_prompt.as_deref(), Some(style.negative.as_str()));
+        assert_eq!(
+            scenes[0].negative_prompt.as_deref(),
+            Some(style.negative.as_str())
+        );
     }
 
     #[test]

@@ -14,15 +14,32 @@ const EN_TERMINATORS: [char; 4] = ['.', '!', '?', ';'];
 
 /// 中文连接词（超长句在此切分，连接词归入后半句）。
 const ZH_CONJUNCTIONS: [&str; 17] = [
-    "但是", "可是", "不过", "然而", "因为", "所以", "于是", "接着", "然后",
-    "突然", "忽然", "只见", "这时", "后来", "最终", "终于", "虽然",
+    "但是", "可是", "不过", "然而", "因为", "所以", "于是", "接着", "然后", "突然", "忽然", "只见",
+    "这时", "后来", "最终", "终于", "虽然",
 ];
 
 /// 英文连接词（前后带空格，避免误匹配单词内部）。
 const EN_CONJUNCTIONS: [&str; 20] = [
-    " and ", " but ", " so ", " because ", " then ", " when ", " while ",
-    " after ", " before ", " however ", " although ", " if ", " until ",
-    " since ", " which ", " that ", " who ", " with ", " where ", " as ",
+    " and ",
+    " but ",
+    " so ",
+    " because ",
+    " then ",
+    " when ",
+    " while ",
+    " after ",
+    " before ",
+    " however ",
+    " although ",
+    " if ",
+    " until ",
+    " since ",
+    " which ",
+    " that ",
+    " who ",
+    " with ",
+    " where ",
+    " as ",
 ];
 
 /// 把整篇故事切成句子列表。
@@ -143,7 +160,10 @@ mod tests {
     #[test]
     fn zh_resplits_at_conjunction() {
         // 37 字 > 36，无逗号，含连接词「但是」（避开与「终于」同时出现）
-        let long = format!("{}但是总算到家了。", "他走了很远很远很远很远很远很远很远很远很远很远很远很远的路");
+        let long = format!(
+            "{}但是总算到家了。",
+            "他走了很远很远很远很远很远很远很远很远很远很远很远很远的路"
+        );
         let out = split_story(&long, Lang::Zh);
         assert_eq!(out.len(), 2, "{out:?}");
         assert!(out[0].ends_with("路"));
@@ -156,7 +176,10 @@ mod tests {
     #[test]
     fn en_splits_by_terminators() {
         let out = split_story("The little rabbit hopped. Then it ate a carrot!", Lang::En);
-        assert_eq!(out, vec!["The little rabbit hopped.", "Then it ate a carrot!"]);
+        assert_eq!(
+            out,
+            vec!["The little rabbit hopped.", "Then it ate a carrot!"]
+        );
     }
 
     #[test]

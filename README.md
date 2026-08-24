@@ -57,6 +57,10 @@ nix-shell
 nix-shell --run "cargo build --release"
 ```
 
+CI（GitHub Actions，`.github/workflows/ci.yml`）会对每个 push / PR 运行
+`cargo fmt --check`、`cargo clippy -D warnings`、`cargo test`，以及 `nix flake check` + `nix build .#`
+（使用 DeterminateSystems/nix-installer-action，Nix 构建产物由 magic-nix-cache 缓存加速）。
+
 Flake 包会自动注入 `PATH`（ffmpeg/ffprobe）、`SSL_CERT_FILE`（cacert）并安装随包字体
 （`AGNES_VIDEO_FREE_FONTS`，供字幕渲染使用）。
 

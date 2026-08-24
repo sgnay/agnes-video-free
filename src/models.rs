@@ -130,7 +130,12 @@ impl StyleProfile {
 
     /// 组装单场完整 prompt：`STYLE_HEADER + SCENE_BODY + MOTION_FOOTER`。
     pub fn build_prompt(&self, scene_body: &str) -> String {
-        format!("{}\n{}\n{}", self.style_header(), scene_body, self.motion_footer)
+        format!(
+            "{}\n{}\n{}",
+            self.style_header(),
+            scene_body,
+            self.motion_footer
+        )
     }
 }
 

@@ -21,7 +21,11 @@ fn compose_negative(extra: &str) -> String {
 
 /// 三个 realistic 风格档案。
 pub fn profiles() -> Vec<StyleProfile> {
-    vec![cinematic::profile(), vlog::profile(), documentary::profile()]
+    vec![
+        cinematic::profile(),
+        vlog::profile(),
+        documentary::profile(),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -30,31 +34,85 @@ pub fn profiles() -> Vec<StyleProfile> {
 
 /// 光线词表（每场至少 1 个）。
 const LIGHT_WORDS: &[&str] = &[
-    "light", "sunlight", "daylight", "glow", "mist", "lamplight", "candlelight",
-    "firelight", "overcast", "neon", "blue-hour", "dawn", "dusk", "golden hour",
-    "morning", "window light",
+    "light",
+    "sunlight",
+    "daylight",
+    "glow",
+    "mist",
+    "lamplight",
+    "candlelight",
+    "firelight",
+    "overcast",
+    "neon",
+    "blue-hour",
+    "dawn",
+    "dusk",
+    "golden hour",
+    "morning",
+    "window light",
 ];
 
 /// 镜头词表（每场至少 1 个）。
 const CAMERA_WORDS: &[&str] = &[
-    "shot", "close-up", "wide shot", "medium shot", "push-in", "tracking",
-    "handheld", "pan", "dolly", "zoom", "tilt", "low-angle", "following",
+    "shot",
+    "close-up",
+    "wide shot",
+    "medium shot",
+    "push-in",
+    "tracking",
+    "handheld",
+    "pan",
+    "dolly",
+    "zoom",
+    "tilt",
+    "low-angle",
+    "following",
     "over-the-shoulder",
 ];
 
 /// 能动元素词表（每场至少 1 个，支撑句意）。
 const MOTION_WORDS: &[&str] = &[
-    "steam", "rising", "rain", "splash", "falling", "walking", "pouring",
-    "flicker", "floating", "wind", "moving", "boiling", "whisk", "trimming",
-    "tying", "hammering", "writing", "handing", "turning", "adjusting",
-    "passing", "spinning", "curtain", "waves", "blowing", "swaying",
+    "steam",
+    "rising",
+    "rain",
+    "splash",
+    "falling",
+    "walking",
+    "pouring",
+    "flicker",
+    "floating",
+    "wind",
+    "moving",
+    "boiling",
+    "whisk",
+    "trimming",
+    "tying",
+    "hammering",
+    "writing",
+    "handing",
+    "turning",
+    "adjusting",
+    "passing",
+    "spinning",
+    "curtain",
+    "waves",
+    "blowing",
+    "swaying",
 ];
 
 /// 禁止词表（出现即重写，prompt-recipes.md §3.3）。
 const BANNED_WORDS: &[&str] = &[
-    "icon", "diagram", "exploded-view", "thought bubble", "puzzle pieces",
-    "infographic", "floating arrow", "radiating lines", "floating stars",
-    "pure white background", "same scene as",
+    "icon",
+    "diagram",
+    "exploded-view",
+    "thought bubble",
+    "puzzle pieces",
+    "infographic",
+    "floating arrow",
+    "radiating lines",
+    "floating stars",
+    "pure white background",
+    "same scene as",
 ];
 
 /// 对 SCENE_BODY 做写实风格规则校验，返回缺失/违规项列表（空 = 通过）。
@@ -104,9 +162,15 @@ mod tests {
 
     #[test]
     fn aspect_line_matches_canvas() {
-        assert_eq!(cinematic::profile().aspect_line(), "vertical 9:16 composition");
+        assert_eq!(
+            cinematic::profile().aspect_line(),
+            "vertical 9:16 composition"
+        );
         assert_eq!(vlog::profile().aspect_line(), "vertical 3:4 composition");
-        assert_eq!(documentary::profile().aspect_line(), "horizontal 16:9 composition");
+        assert_eq!(
+            documentary::profile().aspect_line(),
+            "horizontal 16:9 composition"
+        );
     }
 
     #[test]
@@ -120,7 +184,8 @@ mod tests {
     #[test]
     fn build_prompt_is_three_part() {
         let p = cinematic::profile();
-        let body = "a cat beside a sunny window, close-up, steam rising from a cup, warm morning light";
+        let body =
+            "a cat beside a sunny window, close-up, steam rising from a cup, warm morning light";
         let prompt = p.build_prompt(body);
         let parts: Vec<&str> = prompt.split('\n').collect();
         assert_eq!(parts.len(), 3);
@@ -143,7 +208,8 @@ mod tests {
         assert!(ok.is_empty(), "{ok:?}");
 
         // 禁止词命中
-        let banned = validate_scene_body("an icon diagram with a thought bubble, pure white background");
+        let banned =
+            validate_scene_body("an icon diagram with a thought bubble, pure white background");
         assert!(banned.iter().any(|i| i.contains("禁止词")), "{banned:?}");
     }
 }
