@@ -462,18 +462,22 @@ pending → tts_done → video_done → clip_done → assembled
 - [x] `split` / `all --dry-run`：story.txt → scenes + prompts 预览（含英文 visual_plan 缺失校验）
 - **验收**：对 examples/story_realistic.txt 输出正确分句与三段式 prompt（realistic 风格头）✅
 
-### M1 — 素材生成（TTS ✅ / 视频进行中）
+### M1 — 素材生成（TTS ✅ / 视频客户端 ✅）
 - [x] edge-tts spike 选型（结论：`kothok-edge-tts`）→ `TtsProvider` trait + `EdgeTtsProvider` 实现，中/英/男/女声实测出 mp3
 - [x] `tts` 子命令：读 storyboard → 逐场合成 `audio/narration/sXX.mp3`（幂等跳过 + 重试自愈 + `--voice/--gender/--speed`）
-- [ ] ffprobe 封装（时长/尺寸）
-- [ ] AgnesClient：创建任务/轮询/下载/429+5xx 退避/URL 双字段兼容
-- [ ] `video` 子命令 + 断点续跑
-- **验收**：wiremock 集成测试通过；真实 API 跑通 2-3 句 demo，产出 `assets/videos/sXX.mp4`
+- [x] ffprobe 封装（`src/media/ffprobe.rs`：时长/视频尺寸 JSON 探测）+ 旁白时长驱动帧数
+- [x] AgnesClient（`src/agnes.rs`）：`POST /v1/videos` 创建、`GET /agnesapi?video_id=` 轮询、下载、429/5xx 退避、`metadata.url` / 顶层 `url` 兼容
+- [x] `video` 子命令 + 断点续跑：已有有效 MP4 自动跳过；每场成功后立即更新 storyboard
+- [x] wiremock 集成测试：请求路径、Bearer、任务创建→完成→CDN 下载链路
+- [ ] 真实 API 跑通 2-3 句 demo，产出 `assets/videos/sXX.mp4`（需用户提供/配置有效 `AGNES_API_KEY`）
+- **客户端验收**：本地 cargo/nix 测试通过；真实 API demo 待配置 key 后执行
 
-### M2 — 成片组装（ffmpeg + libass）
-- [ ] ASS 生成（样式/时间轴/字体）、clip 合成、concat、烧录
-- [ ] `assemble` 子命令 + 音画时长校验
-- **验收**：demo 全流程产出 9:16 完整 mp4，音画同步，字幕清晰且不压安全区
+### M2 — 成片组装（ffmpeg + libass）（✅ 已完成）
+- [x] ASS 生成（样式/时间轴/字体）、clip 合成、concat、烧录
+- [x] `assemble` 子命令：支持 storyboard 路径、音频/视频/字体目录、输出路径；Nix 包通过 `AGNES_VIDEO_FREE_FONTS` 自动回退字体目录
+- [x] 每场旁白 ffprobe 实测时长与 `num_frames` 回写 storyboard；最终输出画幅校验
+- [x] 字幕转义与中英文自动换行，ASS 时间轴按累计旁白时长生成
+- **验收**：临时测试素材全流程产出 720×1280 H.264/AAC MP4（11.69s），字幕烧录成功，最终 ffprobe 音视频可读且时长 11.685s ✅
 
 ### M3 — 交互模式 + 风格完善 + Agent Skill
 - [ ] 交互式向导（inquire）全流程

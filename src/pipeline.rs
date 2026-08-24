@@ -22,6 +22,10 @@ pub fn plan_scenes(story: &str, lang: Lang, style: &StyleProfile) -> Vec<Scene> 
                 narration: caption,
                 prompt: Some(prompt),
                 negative_prompt: Some(style.negative.clone()),
+                narration_audio: None,
+                motion_video: None,
+                duration_sec: None,
+                num_frames: None,
             }
         })
         .collect()

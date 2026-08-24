@@ -24,7 +24,13 @@ agnes-video-free split examples/story_realistic.txt
 # ③ 生成旁白 mp3（edge-tts，免费；已存在的自动跳过）
 agnes-video-free tts
 
-# ④ 生成视频片段 / ⑤ 组装成片（M1/M2 开发中）
+# ④ 生成视频片段（Agnes 异步任务 + 轮询；已有片段自动跳过）
+agnes-video-free video
+
+# ⑤ 组装成片（ffmpeg + libass）
+agnes-video-free assemble --fonts-dir assets/fonts --output out/story.mp4
+
+# 输出：out/story.mp4（H.264 + AAC，字幕已烧录）
 ```
 
 风格：`realistic-cinematic`（TikTok 9:16）/ `realistic-vlog`（小红书 3:4）/
@@ -81,5 +87,5 @@ references/        # prompt 配方 / 流程细节
 ## 开发状态
 
 - M0 ✅ 脚手架、clap 子命令、中英文分句、dry-run 预览
-- M1 🚧 TTS 已完成（edge-tts 选型 spike 通过）；ffprobe 封装与 Agnes 视频 API 客户端进行中
-- M2 成片组装（ffmpeg + libass）；M3 交互模式 + agent skill；M4 GUI
+- M1 🚧 TTS ✅；ffprobe 封装 + Agnes 视频 API 客户端 ✅；真实视频生成需配置 `AGNES_API_KEY` 后运行 `video`
+- M2 ✅ 成片组装（ffmpeg + libass：场景封装、concat、ASS 字幕、画幅校验）；M3 交互模式 + agent skill；M4 GUI

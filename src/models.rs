@@ -153,6 +153,18 @@ pub struct Scene {
     /// 负向词。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub negative_prompt: Option<String>,
+    /// 旁白文件路径（相对工作区）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub narration_audio: Option<String>,
+    /// Agnes 视频文件路径（相对工作区）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub motion_video: Option<String>,
+    /// ffprobe 实测旁白时长。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_sec: Option<f64>,
+    /// Agnes 请求帧数。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_frames: Option<u32>,
 }
 
 /// 项目数据源（单一 storyboard.json），PLAN.md §3.4。
@@ -174,7 +186,6 @@ pub struct Storyboard {
 ///
 /// 规则：24fps，`num_frames = 8n + 1`，上限 441（≈18.3s）、下限 41（≈1.7s）。
 /// 见 PLAN.md §4 与上游 pipeline.md 的换算公式。
-#[allow(dead_code)] // M1 接入 ffprobe 实测时长后使用
 pub fn num_frames_for_duration(duration_sec: f64) -> u32 {
     let target = (duration_sec * 24.0).round().max(0.0) as u64;
     let n = target.saturating_sub(1).div_ceil(8);
