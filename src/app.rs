@@ -739,17 +739,19 @@ impl Render for OcrAppView {
                     .size_full()
                     .gap_2()
                     .p_2()
-                    // Preview side panel
+                    // Preview side panel (1/3 width; ratio 1:2 with results)
                     .child(
                         div()
-                            .w_48()
+                            .flex_1()
+                            .min_w_0()
                             .flex()
                             .flex_col()
                             .items_center()
                             .child(
                                 div()
                                     .w_full()
-                                    .h_48()
+                                    .min_w_0()
+                                    .flex_1()
                                     .rounded_md()
                                     .bg(rgb(0x303030))
                                     .border_1()
@@ -760,12 +762,19 @@ impl Render for OcrAppView {
                                     .child(match self.model.source_type {
                                         OcrSourceType::Image => {
                                             if let Some(ref path) = self.model.image_path {
-                                                div().child(
-                                                    img(path.as_path())
-                                                        .w_full()
-                                                        .h_full()
-                                                        .object_fit(gpui::ObjectFit::Contain),
-                                                )
+                                                // Wrapper fills the preview box, which flex layout gives a
+                                                // definite height, so img's h_full resolves and
+                                                // object-fit Contain scales the whole image instead
+                                                // of clipping.
+                                                div()
+                                                    .w_full()
+                                                    .h_full()
+                                                    .child(
+                                                        img(path.as_path())
+                                                            .w_full()
+                                                            .h_full()
+                                                            .object_fit(gpui::ObjectFit::Contain),
+                                                    )
                                             } else {
                                                 div()
                                                     .text_color(rgb(0x808080))
@@ -835,12 +844,13 @@ impl Render for OcrAppView {
                                     }),
                             ),
                     )
-                    // Results side panel
+                    // Results side panel (2/3 width; ratio 1:2 with preview)
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .flex_1()
+                            .flex_grow(2.0)
                             .size_full()
                             .rounded_md()
                             .bg(rgb(0x303030))

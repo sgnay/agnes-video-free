@@ -26,3 +26,8 @@ tempfile = "3.8"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[dev-dependencies]
+gpui = { package = "gpui-unofficial", version = "1.15.0", default-features = false, features = ["font-kit", "wayland", "x11", "test-support"] }
+image = "0.25"
+smallvec = "1"
