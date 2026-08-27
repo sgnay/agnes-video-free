@@ -1,143 +1,69 @@
-# Agent 工作流参考
+# Agent 工作流
 
-本文档配合根目录 `SKILL.md` 使用，给出 Agent 可直接采用的非交互调用方式。
+本项目只处理独立视觉场景。输入是 `visual_plan.v2.json`，输出是视觉视频和可选的独立音频、BGM、SRT/LRC 字幕成片。
 
-## 环境变量
+## 1. 预览与生成 storyboard
 
 ```bash
-export AGNES_API_KEY=sk-...
+nix run .# -- split \
+  --visual-plan examples/visual_plan.v2.example.json \
+  --style realistic-cinematic \
+  --lang zh \
+  --title "我的视频" \
+  --out storyboard.json
 ```
 
-如果只做预览、分句、TTS 或组装已有素材，不需要 API Key；`video` 和需要补视频的 `resume` 才需要 Key。
+这一步只解析场景、计算帧数并写入 prompt，不请求视频 API。
 
-## 推荐流程
+## 2. 生成视觉视频
+
+得到用户确认且已配置 `AGNES_API_KEY` 后：
 
 ```bash
-# 0. 先看 prompt，不请求任何生成 API
-nix run .# -- all story.txt \
-  --title "我的故事" \
-  --lang zh \
-  --style realistic-cinematic \
-  --visual-plan examples/visual_plan.example.json \
-  --dry-run
+nix run .# -- video --storyboard storyboard.json
+```
 
-# 1. 创建 storyboard
-nix run .# -- split story.txt \
-  --title "我的故事" \
-  --lang zh \
-  --style realistic-cinematic \
-  --visual-plan examples/visual_plan.example.json \
-  --out storyboard.json
+每个场景按 `duration_sec` 生成，任务 ID 会在创建后立刻持久化。已有有效 MP4 会跳过。
 
-# 2. 旁白
-nix run .# -- tts \
-  --storyboard storyboard.json \
-  --gender female \
-  --speed 1.0 \
-  --out-dir audio/narration
+## 3. 组装独立轨道
 
-# 3. 查看当前状态
-nix run .# -- status \
-  --storyboard storyboard.json \
-  --audio-dir audio/narration \
-  --video-dir assets/videos \
-  --output out/story.mp4
-
-# 4. 用户确认后生成视频
-nix run .# -- video \
-  --storyboard storyboard.json \
-  --audio-dir audio/narration \
-  --out-dir assets/videos
-
-# 5. 组装成片
+```bash
 nix run .# -- assemble \
   --storyboard storyboard.json \
-  --audio-dir audio/narration \
-  --video-dir assets/videos \
-  --fonts-dir assets/fonts \
+  --audio voiceover.mp3 \
+  --bgm music.mp3 \
+  --subtitles captions.srt \
   --output out/story.mp4
 ```
 
-如果使用已经安装的二进制，把 `nix run .# --` 替换为 `agnes-video-free`。
+音频和字幕可以全部省略。`--audio` 是主音轨，`--bgm` 会循环并以 22% 音量混入；字幕支持 SRT/LRC，并保持文件中的时间轴。
 
-## 恢复决策表
+## 4. 状态与恢复
 
-| `status` 结果 | 下一步 |
+```bash
+nix run .# -- status --storyboard storyboard.json
+nix run .# -- resume --storyboard storyboard.json \
+  --audio voiceover.mp3 --bgm music.mp3 --subtitles captions.srt
+```
+
+恢复决策：
+
+| 状态 | 操作 |
 |---|---|
-| 有场景 `待旁白` | `resume` 或 `tts` |
-| 有场景 `待视频` | 检查 `AGNES_API_KEY` 后运行 `resume` 或 `video` |
-| 有场景 `待组装` | 运行 `resume` 或 `assemble`，不需要 API Key |
-| 所有场景 `ready`，最终成片缺失 | 运行 `assemble` |
-| 最终成片有效 | 无需重复组装；除非用户明确要求重新渲染 |
+| 有场景 `待视频` | `resume`，只生成缺失视觉视频 |
+| 有场景 `任务待轮询` | `resume`，复用已保存任务 ID |
+| 所有视频有效、成片缺失 | `assemble` 或 `resume` |
+| 所有视频和成片有效 | 无需操作 |
 
-完整恢复命令：
-
-```bash
-nix run .# -- resume \
-  --storyboard storyboard.json \
-  --audio-dir audio/narration \
-  --video-dir assets/videos \
-  --fonts-dir assets/fonts \
-  --output out/story.mp4
-```
-
-`resume` 会根据文件是否存在以及文件大小判定阶段，不依赖独立数据库；视频任务创建后的 `agnes_task_id` 同时保存在 storyboard 中。视频文件必须至少 20 KB；旁白和临时 clip 必须是非空文件。
-
-visual plan 示例见 `examples/visual_plan.example.json`。它只影响 `split/all` 生成的场景 prompt，不会改变 TTS 旁白文本或字幕内容。
-
-## 失败处理
-
-### TTS 失败
-
-保留已成功的 mp3，直接再次运行：
+## 5. 清理单个场景
 
 ```bash
-nix run .# -- tts --storyboard storyboard.json
+nix run .# -- clean --storyboard storyboard.json --scene v01 --dry-run
+nix run .# -- clean --storyboard storyboard.json --scene v01 --stage all --yes
 ```
 
-### 清理单个损坏场景
+只允许安全的单个场景 ID。`video` 阶段同时删除依赖它的临时 clip；最终成片始终保留。
 
-清理前先预览：
+## 6. 约束
 
-```bash
-nix run .# -- clean --scene s07 --stage all --dry-run
-```
-
-确认目标无误后执行：
-
-```bash
-nix run .# -- clean --scene s07 --stage all --yes
-```
-
-只删除特定阶段时可将 `--stage` 改为 `audio`、`video` 或 `clip`；清理 `audio`/`video` 会同时清理依赖它们的临时 clip。最终成片始终保留；删除音频或视频后用 `resume` 重新生成并组装，删除临时 clip 后用 `assemble` 即可。
-
-### Agnes 单段失败
-
-不要删除其他场景。先查看状态，再运行：
-
-```bash
-nix run .# -- status
-nix run .# -- resume
-```
-
-客户端会对 429 和 5xx 自动重试。免费 Key 默认串行处理，不能通过增大并发来规避限流。
-
-### 组装失败
-
-确认系统存在 ffmpeg/ffprobe，并确认字体目录有效：
-
-```bash
-nix develop --command ffmpeg -version
-nix run .# -- assemble --fonts-dir assets/fonts
-```
-
-组装失败不会删除已下载的场景视频。
-
-## 阶段完成报告示例
-
-```text
-阶段完成：视频生成
-新增 3，跳过 1，失败 0
-产物：assets/videos/s01.mp4 ... assets/videos/s04.mp4
-下一步：运行 assemble 生成带旁白和字幕的最终 MP4。
-```
+visual plan 的每项必须包含唯一 `id`、非空英文 `visual` 和 1.7 到 18.3 秒的 `duration_sec`。相邻镜头重复人物描述。程序会自动加入正确人体结构、稳定连续运动、无抖动、无变形、无水印和无文字约束。

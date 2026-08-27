@@ -1,5 +1,5 @@
 {
-  description = "agnes-video-free：把故事文本变成带旁白/字幕的短视频（Agnes Video V2.0 + edge-tts + ffmpeg）";
+  description = "agnes-video-free：按视觉场景生成视频并叠加独立音轨、音乐和字幕";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -10,7 +10,7 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        # 运行时依赖：ffmpeg（含 ffprobe）用于旁白时长探测与成片组装（M2）
+        # 运行时依赖：ffmpeg（含 ffprobe）用于视觉片段拼接、混音和字幕组装
         runtimeDeps = with pkgs; [ ffmpeg ];
         agnesVideoFree = pkgs.rustPlatform.buildRustPackage {
           pname = "agnes-video-free";
@@ -23,7 +23,7 @@
             pkg-config
             makeWrapper
           ];
-          # 固定 CA 证书，保证 edge-tts / Agnes API（reqwest）TLS 可用
+          # 固定 CA 证书，保证 Agnes API（reqwest）TLS 可用
           SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
           postInstall = ''
             # 随包安装 OFL 字体（思源黑体），供字幕渲染（M2）与本地资源引用
@@ -36,7 +36,7 @@
               --set AGNES_VIDEO_FREE_FONTS $out/share/agnes-video-free/fonts
           '';
           meta = with pkgs.lib; {
-            description = "用 Agnes Video V2.0 + edge-tts + ffmpeg 把故事文本变成竖屏短视频（TikTok / 小红书 / 微博）";
+            description = "用 Agnes Video V2.0 + ffmpeg 将视觉场景组装成短视频（TikTok / 小红书 / 微博）";
             mainProgram = "agnes-video-free";
             platforms = platforms.linux;
           };
@@ -48,7 +48,7 @@
         apps.default = {
           type = "app";
           program = "${agnesVideoFree}/bin/agnes-video-free";
-          meta.description = "agnes-video-free：故事文本 → 短视频";
+          meta.description = "agnes-video-free：视觉场景 → 独立轨道短视频";
         };
 
         devShells.default = pkgs.mkShell {

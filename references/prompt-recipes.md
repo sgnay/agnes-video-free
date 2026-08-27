@@ -163,7 +163,7 @@ natural realistic motion, slow subtle cinematic camera movement, gentle subject 
 **NEGATIVE**（= 共享基线 + 专属）：
 
 ```
-text, letters, subtitles, captions, Chinese characters, English words, numbers, watermark, logo, signature, border frame, cartoon, illustration, anime, 3D render, CGI artifacts, distorted faces, extra limbs, mutated hands, flickering, morphing, low quality, flat lighting, amateur video look
+text, letters, subtitles, captions, Chinese characters, English words, numbers, watermark, logo, signature, border frame, cartoon, illustration, anime, 3D render, CGI artifacts, distorted faces, asymmetrical face, extra limbs, extra arms, extra hands, missing fingers, malformed hands, mutated hands, twisted body, impossible anatomy, 360-degree head rotation, unnatural joint rotation, flickering, jitter, camera shake, frame instability, morphing, warping, deformation, low quality, flat lighting, amateur video look
 ```
 
 ### 4.3 visual_plan 示例
@@ -223,7 +223,7 @@ natural realistic motion, casual handheld camera feel, gentle everyday subject m
 **NEGATIVE**（= 共享基线 + 专属）：
 
 ```
-text, letters, subtitles, captions, Chinese characters, English words, numbers, watermark, logo, signature, border frame, cartoon, illustration, anime, 3D render, CGI artifacts, distorted faces, extra limbs, mutated hands, flickering, morphing, low quality, heavy film grain, cinematic teal-orange grade, moody dark lighting
+text, letters, subtitles, captions, Chinese characters, English words, numbers, watermark, logo, signature, border frame, cartoon, illustration, anime, 3D render, CGI artifacts, distorted faces, asymmetrical face, extra limbs, extra arms, extra hands, missing fingers, malformed hands, mutated hands, twisted body, impossible anatomy, 360-degree head rotation, unnatural joint rotation, flickering, jitter, camera shake, frame instability, morphing, warping, deformation, low quality, heavy film grain, cinematic teal-orange grade, moody dark lighting
 ```
 
 ### 5.3 visual_plan 示例
@@ -275,7 +275,7 @@ natural realistic motion, slow steady camera pan or tilt, natural subject moveme
 **NEGATIVE**（= 共享基线 + 专属）：
 
 ```
-text, letters, subtitles, captions, Chinese characters, English words, numbers, watermark, logo, signature, border frame, cartoon, illustration, anime, 3D render, CGI artifacts, distorted faces, extra limbs, mutated hands, flickering, morphing, low quality, dramatic stage lighting, heavy color grade, cinematic slow-motion feel
+text, letters, subtitles, captions, Chinese characters, English words, numbers, watermark, logo, signature, border frame, cartoon, illustration, anime, 3D render, CGI artifacts, asymmetrical face, extra limbs, extra arms, extra hands, missing fingers, malformed hands, mutated hands, twisted body, impossible anatomy, 360-degree head rotation, unnatural joint rotation, flickering, jitter, camera shake, frame instability, morphing, warping, deformation, low quality, dramatic stage lighting, heavy color grade, cinematic slow-motion feel
 ```
 
 ### 6.3 visual_plan 示例

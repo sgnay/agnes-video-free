@@ -1,210 +1,94 @@
 ---
 name: agnes-video-free
-description: 使用 Agnes Video V2.0、Rust edge-tts 和 ffmpeg 将中文或英文故事制作成带旁白与字幕的 TikTok、小红书或微博短视频。适用于短视频、文生视频、故事视频、竖屏视频、Agnes 视频等任务。
+description: 使用 Agnes Video V2.0 和 ffmpeg，按独立视觉场景生成短视频，并叠加独立音轨、背景音乐与 SRT/LRC 字幕。
 ---
 
 # agnes-video-free Agent Skill
 
-这个 Skill 让 Agent 通过本仓库的 Rust CLI 生成故事短视频。优先使用子命令模式，不要直接编辑中间产物；所有阶段都围绕同一个 `storyboard.json` 工作。
+本工具只接受 `visual_plan.v2.json` 的 `scenes` 数组。视觉场景、音频和字幕是三个独立输入：不要按字幕切视频，不要把字幕或音频文本写进 Agnes prompt。
 
-## 安全与执行原则
+## 安全规则
 
-- 在用户明确确认之前，只执行 `all --dry-run`、`split`、`status` 等不请求 Agnes 视频 API 的步骤。
-- 需要视频生成时，确认当前环境已有 `AGNES_API_KEY`；不要在聊天、日志或提交中输出 API Key。
-- 默认 API 地址是 `https://apihub.agnes-ai.com`，不要切换到长期维护中的中国站。
-- TTS 使用 Rust 原生 edge-tts，不需要 Agnes API Key；视频生成和下载才需要 Key。
-- 生成任务可能耗时很长。默认串行处理，不能通过重复提交来“催进度”。
-- 中断后先运行 `status`，再运行 `resume`；不要删除有效的 mp3/mp4。
-- 只有用户明确要求时，才使用 `clean --scene ... --yes` 删除单个损坏素材并重新生成；优先先用 `--dry-run`。
+- 在用户明确确认前，只运行 `split`、`styles`、`status` 或 `--dry-run` 类检查，不请求 Agnes 视频 API。
+- 需要生成视频时确认 `AGNES_API_KEY` 已配置，不要在聊天、日志或提交中输出 key。
+- 默认 API 地址是 `https://apihub.agnes-ai.com`。
+- 视频任务创建后会立刻写入 storyboard 的 `agnes_task_id`。中断后先运行 `status`，再运行 `resume`。
+- 有效视频不要重复请求；只有明确要求时才使用 `clean --yes` 删除单个场景素材。
+- 任何外部音频、BGM 和字幕只在 `assemble` 阶段处理。
 
-## 前置条件
-
-运行二进制、Cargo 或 Nix Flake 均可。推荐在仓库根目录使用：
+## 标准流程
 
 ```bash
 BIN="nix run .# --"
-# 也可以使用已安装的 agnes-video-free 或 `cargo run --`
-```
 
-视频组装需要 `ffmpeg`/`ffprobe` 和随包思源黑体。Nix 运行环境会自动提供它们；非 Nix 环境默认使用 `assets/fonts`。
-
-视频阶段需要：
-
-```bash
-export AGNES_API_KEY=sk-...
-# 或在当前工作目录的 .env 中写入 AGNES_API_KEY=sk-...
-```
-
-不要把 `.env` 加入 Git。
-
-## 标准工作流
-
-### 1. 预览，不产生网络请求
-
-先确认故事、语言和风格：
-
-```bash
-$BIN all story.txt \
-  --title "我的故事" \
-  --lang zh \
+$BIN split \
+  --visual-plan examples/visual_plan.v2.example.json \
   --style realistic-cinematic \
-  --visual-plan examples/visual_plan.example.json \
-  --dry-run
-```
-
-可用风格：
-
-- `realistic-cinematic`：TikTok，720×1280，电影写实
-- `realistic-vlog`：小红书，1080×1440，生活 vlog
-- `realistic-documentary`：微博，1280×720，纪录片
-
-检查分句是否合理。提供 `visual_plan.json` 后，匹配场景的英文描述会作为 `SCENE_BODY`；未匹配场景仍使用分句原文。写实画面描述应包含具体的“主体 + 环境 + 动作 + 光线 + 镜头”。
-
-### 2. 创建或更新 storyboard
-
-```bash
-$BIN split story.txt \
-  --title "我的故事" \
   --lang zh \
-  --style realistic-cinematic \
-  --visual-plan examples/visual_plan.example.json \
+  --title "我的视频" \
   --out storyboard.json
-```
 
-`split` 会覆盖指定的 storyboard 输出文件。若已有项目正在生成，不要对同一个 storyboard 重新 `split`，否则会丢失原有场景的素材字段。visual plan 使用 JSON 对象格式，key 支持 `s01` 或 `01`；空描述和非法 JSON 会直接报错，未对应分句的 key 会给出警告。
+# 用户确认后执行，需要 AGNES_API_KEY
+$BIN video --storyboard storyboard.json
 
-### 3. 生成旁白
-
-```bash
-$BIN tts \
-  --storyboard storyboard.json \
-  --gender female \
-  --speed 1.0 \
-  --out-dir audio/narration
-```
-
-有效的非空 mp3 会自动跳过；缺失或空文件会重新生成。中文默认女声为 `zh-CN-XiaoyiNeural`，英文默认女声为 `en-US-JennyNeural`。如需指定音色，使用 `--voice`。
-
-### 4. 生成 Agnes 视频片段
-
-在用户确认后执行：
-
-```bash
-$BIN video \
-  --storyboard storyboard.json \
-  --audio-dir audio/narration \
-  --out-dir assets/videos
-```
-
-每个场景的旁白时长由 `ffprobe` 测量，并据此计算满足 `8n+1` 的 `num_frames`。任务创建成功后会立即将 `agnes_task_id` 写入 storyboard；有效的、超过 20 KB 的 mp4 会自动跳过。默认轮询间隔为 8 秒，单段最长等待 900 秒。
-
-可在测试或特殊服务端场景覆盖：
-
-```bash
-$BIN video \
-  --storyboard storyboard.json \
-  --api-base-url https://apihub.agnes-ai.com \
-  --poll-interval 8 \
-  --poll-timeout 900
-```
-
-### 5. 查看状态
-
-```bash
-$BIN status \
-  --storyboard storyboard.json \
-  --audio-dir audio/narration \
-  --video-dir assets/videos \
-  --output out/story.mp4
-```
-
-状态含义：
-
-- `待旁白`：缺少或为空的 `<id>.mp3`
-- `待视频`：旁白存在，但 `<id>.mp4` 缺失或小于 20 KB
-- `待组装`：旁白和视频均存在，但临时 clip 尚未完成
-- `ready`：该场景的 clip 已存在
-- 最终成片另行显示；只有有效 mp4 才算完成
-
-### 6. 中断后恢复
-
-```bash
-$BIN resume \
-  --storyboard storyboard.json \
-  --audio-dir audio/narration \
-  --video-dir assets/videos \
-  --fonts-dir assets/fonts \
-  --output out/story.mp4
-```
-
-`resume` 的行为：
-
-1. 缺少旁白时执行 TTS，已有有效旁白跳过；
-2. 缺少视频时优先使用 storyboard 中的 `agnes_task_id` 继续轮询，只有没有任务 ID 时才创建新任务；已有有效视频跳过；如果视频已经齐全，不会请求 Agnes API；
-3. 最终成片已存在且有效时跳过组装，否则执行 `assemble`；
-4. 任一阶段失败都会保留之前已经完成的产物，下一次可再次运行 `resume`。
-
-如果只需要重新组装，不需要 API Key：
-
-```bash
 $BIN assemble \
   --storyboard storyboard.json \
-  --audio-dir audio/narration \
-  --video-dir assets/videos \
-  --fonts-dir assets/fonts \
+  --audio voiceover.mp3 \
+  --bgm music.mp3 \
+  --subtitles captions.srt \
   --output out/story.mp4
 ```
 
-### 7. 安全清理单个场景
+`--audio`、`--bgm`、`--subtitles` 都是可选参数。字幕支持 `.srt` 和 `.lrc`，时间轴由文件决定。
 
-先预览待删除目标：
+## visual_plan.v2
 
-```bash
-$BIN clean --scene s01 --stage all --dry-run
+```json
+{
+  "scenes": [
+    {
+      "id": "v01",
+      "visual": "a quiet courtyard at dawn, one consistent woman opens a wooden window, soft morning light, slow push-in",
+      "duration_sec": 8.0
+    }
+  ]
+}
 ```
 
-确认后再删除：
+每个场景必须有唯一且安全的 `id`、非空英文 `visual` 和 1.7 到 18.3 秒的 `duration_sec`。相邻场景应重复人物外观和服装描述，以提高跨镜头一致性。程序会自动追加正确人体结构、自然头部转动、稳定连续运动和无水印约束，以及对应 negative prompt。
+
+## 状态与恢复
 
 ```bash
-$BIN clean --scene s01 --stage all --yes
+$BIN status --storyboard storyboard.json
+$BIN resume --storyboard storyboard.json \
+  --audio voiceover.mp3 --bgm music.mp3 --subtitles captions.srt
 ```
 
-`--stage` 可选 `audio`、`video`、`clip` 或 `all`。命令必须指定单个场景 ID，拒绝路径穿越字符；不删除最终成片，只同步清理 storyboard 中已删除素材的状态。清理 `audio` 或 `video` 时会同时清理依赖它们的临时 clip；删除后运行 `resume` 会重新生成缺失阶段并覆盖旧成片，若只删除 `clip` 则可直接运行 `assemble`。
+`video` 按视觉场景时长计算 `8n+1` 帧数，成功下载的 MP4 自动跳过。`resume` 只补齐缺失视觉视频；素材齐全且成片有效时跳过组装。
 
-## 交互模式
+清理前先预览：
 
-面向人类用户时可让用户自己运行：
+```bash
+$BIN clean --storyboard storyboard.json --scene v01 --dry-run
+$BIN clean --storyboard storyboard.json --scene v01 --stage all --yes
+```
+
+## 交互向导
 
 ```bash
 $BIN interactive
-# 或直接运行：agnes-video-free
+# 或直接运行
+agnes-video-free
 ```
 
-交互向导支持选择风格、语言、故事文件/多行粘贴、音色、语速和输出目录；确认后才执行完整的 `split → tts → video → assemble` 流程。Agent 不应模拟交互输入，除非用户明确要求自动化测试。
+向导流程是：选择风格和语言 -> 读取 visual plan -> 选择项目目录 -> 选择主音轨、BGM、字幕 -> 预览场景和总时长 -> 确认 -> 生成视频 -> 组装成片。向导不生成 TTS，也没有旧的旁白驱动画面模式。
 
-## Agent 输出规范
+## 提示词要求
 
-每完成一个阶段，向用户报告：
-
-1. 实际执行的命令和产物路径；
-2. 成功、跳过、失败的场景数量；
-3. 下一步建议。
-
-推荐报告格式：
-
-```text
-阶段完成：TTS
-新增 4，跳过 2，失败 0
-产物：audio/narration/*.mp3
-下一步：运行 status 确认素材状态，然后执行 video（需要 AGNES_API_KEY）。
-```
-
-失败时不要把无关阶段标记为成功；说明可以安全重试的命令，并指出已经保留的产物。
-
-## 不要做的事情
-
-- 不要在视频任务完成前重复提交同一个场景。
-- 不要把字幕交给视频模型绘制；字幕由 ffmpeg + libass 在本地烧录。
-- 不要因为纯文生视频跨场景人物脸部变化就批量重跑。
-- 不要将 Agnes API Key 传给 CDN 视频下载地址。
-- 不要覆盖正在使用的 `storyboard.json`，除非用户明确要求重新分句。
+- 每场只描述一个清晰视觉镜头和一组连续动作。
+- 相邻场景重复人物的外观、年龄、发型和服装描述。
+- 使用明确的光线、环境和镜头运动词。
+- 保持一个头、两只手、正确手指和自然关节运动。
+- 明确要求稳定画面，禁止抖动、闪烁、变形、360 度转头、水印、logo 和文字。
+- 字幕永远由本地 ffmpeg/libass 渲染，不交给视频模型绘制。

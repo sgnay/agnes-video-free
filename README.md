@@ -1,121 +1,139 @@
 # agnes-video-free
 
-用 Rust 编写的故事短视频自动生成工具：把一段中文/英文故事文本变成带旁白、字幕的竖屏短视频，
-发布到 TikTok / 小红书 / 微博。
+用 Rust 编写的视觉短视频生成工具：读取 `visual_plan.v2.json`，按视觉场景调用 Agnes Video V2.0，再在本地叠加独立音轨、背景音乐和字幕，发布到 TikTok、小红书或微博。
 
-**工具链（全免费）**：Agnes Video V2.0 纯文生视频（当前 $0/秒，国际站 `https://apihub.agnes-ai.com`）
-+ Rust 原生 edge-tts 免费旁白 + ffmpeg/libass 确定性字幕渲染（无 Node.js / Chrome 依赖）。
-
-> 借鉴 [story-handdrawn-video](https://github.com/liangdabiao/story-handdrawn-video) 的方法论：
-> 先 TTS 定时长 → 纯文生视频 → 字幕永远本地渲染。完整规划见 [PLAN.md](PLAN.md)。
+视频提示词、音频和字幕完全分离。一个 `scenes` 项对应一个视觉镜头，不按字幕或句子切镜头，因此字幕可以跨越多个视觉场景。
 
 ## 快速开始
 
-推荐直接使用交互式向导。无子命令或显式运行 `interactive` 都会进入向导：
+准备 Agnes API key：
 
 ```bash
-# 环境变量（或在工作区放 .env 一行 AGNES_API_KEY=sk-...）
 export AGNES_API_KEY=sk-...
+```
 
-# 交互式全流程：选择风格/语言/音色/输出目录，确认后依次执行四个阶段
+生成视觉 storyboard：
+
+```bash
+agnes-video-free split \
+  --visual-plan examples/visual_plan.v2.example.json \
+  --style realistic-cinematic \
+  --lang zh \
+  --title "早上上班" \
+  --out storyboard.json
+```
+
+生成视觉片段：
+
+```bash
+agnes-video-free video --storyboard storyboard.json
+```
+
+组装成片。音轨、BGM 和字幕均可省略：
+
+```bash
+agnes-video-free assemble \
+  --storyboard storyboard.json \
+  --audio voiceover-or-main-track.mp3 \
+  --bgm morning-music.mp3 \
+  --subtitles captions.srt \
+  --fonts-dir assets/fonts \
+  --output out/morning.mp4
+```
+
+字幕支持 `.srt` 和 `.lrc`。字幕时间轴由字幕文件本身决定，不会根据视觉场景边界自动改写。
+
+## visual_plan.v2 格式
+
+```json
+{
+  "scenes": [
+    {
+      "id": "v01",
+      "visual": "a quiet bedroom at dawn, one consistent woman opens the window, soft morning light, slow push-in",
+      "duration_sec": 8.0
+    },
+    {
+      "id": "v02",
+      "visual": "the same woman rides a bicycle through a waking city street, morning light, smooth tracking shot",
+      "duration_sec": 8.0
+    }
+  ]
+}
+```
+
+每个场景的 `duration_sec` 必须在 1.7 到 18.3 秒之间。程序会根据该时长计算 Agnes 所需的 `8n+1` 帧数。建议在相邻场景中重复人物的完整外观描述，帮助模型保持人物一致。
+
+程序会自动向每个场景加入写实视频约束：单一人物、正确人体结构、两只手和五指、自然头部转动、稳定连续运动、无抖动和变形、无水印和文字。对应的 negative prompt 也会排除多手、多臂、缺指、360 度转头、镜头抖动、闪烁、变形、水印和 logo。
+
+## 交互向导
+
+直接运行即可进入交互向导：
+
+```bash
 agnes-video-free
-# 等价写法
+# 或
 agnes-video-free interactive
 ```
 
-向导会让你选择风格、语言、故事来源（文件或多行粘贴）、音色和语速；随后展示分句和首场 prompt 预览，确认后依次执行 `split → tts → video → assemble`。
-默认产物为 `storyboard.json`、`audio/narration/`、`assets/videos/` 和 `out/<标题>.mp4`；输入 `q` 可取消配置。
-已有 mp3/mp4 会自动跳过，已完成的文件会保留，便于后续手动重跑子命令。视频任务创建后会立即把 `agnes_task_id` 写入 storyboard，程序中断时可继续轮询原任务。
+向导依次选择风格、语言、visual plan、项目目录、主音轨、BGM 和字幕，确认后执行：
 
-需要脚本或 Agent 调用时，仍可使用以下子命令：
-
-```bash
-# ① 分句 + 预览 prompt（不请求任何生成 API）
-agnes-video-free all examples/story_realistic.txt \\
-  --visual-plan examples/visual_plan.example.json --dry-run
-
-# ② 分句 → storyboard.json（visual_plan 可选）
-agnes-video-free split examples/story_realistic.txt \\
-  --visual-plan examples/visual_plan.example.json
-
-# ③ 生成旁白 mp3（edge-tts，免费；已存在的自动跳过）
-agnes-video-free tts
-
-# ④ 生成视频片段（Agnes 异步任务 + 轮询；已有片段自动跳过）
-agnes-video-free video
-
-# ⑤ 组装成片（ffmpeg + libass）
-agnes-video-free assemble --fonts-dir assets/fonts --output out/story.mp4
-
-# 查看每场状态
-agnes-video-free status
-
-# 中断后继续：只补齐缺失阶段，不重复请求已完成素材或已记录任务
-agnes-video-free resume --output out/story.mp4
-
-# 安全清理单个场景（先预览，实际删除需显式 --yes）
-agnes-video-free clean --scene s01 --dry-run
-agnes-video-free clean --scene s01 --stage all --yes
-
-# 输出：out/story.mp4（H.264 + AAC，字幕已烧录）
+```text
+visual_plan -> storyboard -> Agnes 视觉视频 -> 独立轨道与字幕 -> 成片
 ```
 
-风格：`realistic-cinematic`（TikTok 9:16）/ `realistic-vlog`（小红书 3:4）/
-`realistic-documentary`（微博 16:9）。配方见 [references/prompt-recipes.md](references/prompt-recipes.md)。
-`visual_plan.json` 示例见 [examples/visual_plan.example.json](examples/visual_plan.example.json)，用于为场景提供英文画面描述。
-Agent 调用契约见 [SKILL.md](SKILL.md) 和 [references/agent-workflow.md](references/agent-workflow.md)。
+向导不会生成 TTS，不会把字幕或音频文本放进视频提示词。
 
-## NixOS 打包与运行
-
-项目按 [simple-translation](https://github.com/sgnay/simple-translation) 的方式提供 Nix Flake，
-使用锁定的 nixpkgs 与 flake-utils 管理 Rust 编译器、ffmpeg（含 ffprobe）、CA 证书与随包 OFL 字体。
-NixOS 用户需要启用 Flakes（例如在 NixOS 配置中设置 `nix.settings.experimental-features = [ "nix-command" "flakes" ];`）。
+## 其他命令
 
 ```bash
-# 进入包含 Rust 和 ffmpeg 的开发环境
+# 查看风格
+agnes-video-free styles
+
+# 查看场景、任务和视频状态
+agnes-video-free status --storyboard storyboard.json
+
+# 中断后继续生成缺失视频，并重新组装（需要时传入轨道参数）
+agnes-video-free resume --storyboard storyboard.json \
+  --audio voiceover.mp3 --bgm music.mp3 --subtitles captions.srt
+
+# 先预览，再确认删除单个场景
+agnes-video-free clean --storyboard storyboard.json --scene v01 --dry-run
+agnes-video-free clean --storyboard storyboard.json --scene v01 --stage all --yes
+```
+
+`resume` 会复用 storyboard 中已经保存的 `agnes_task_id`，有效视频不会重复请求。`clean` 只删除指定场景的视频或临时 clip，不删除最终成片。
+
+## NixOS
+
+```bash
 nix develop
-
-# 编译 Nix 包，结果位于 ./result/bin/agnes-video-free
 nix build
-
-# 直接在 Nix 运行时环境中启动（含 ffmpeg 与证书）
-nix run .# -- all examples/story_realistic.txt --dry-run
-
-# 运行单元测试
+nix run .# -- styles
 nix develop --command cargo test
 ```
 
-仍可使用传统入口进入开发环境：
-
-```bash
-nix-shell
-nix-shell --run "cargo build --release"
-```
-
-CI（GitHub Actions，`.github/workflows/ci.yml`）会对每个 push / PR 运行
-`cargo fmt --check`、`cargo clippy -D warnings`、`cargo test`，以及 `nix flake check` + `nix build .#`
-（使用 DeterminateSystems/nix-installer-action，Nix 构建产物由 magic-nix-cache 缓存加速）。
-
-Flake 包会自动注入 `PATH`（ffmpeg/ffprobe）、`SSL_CERT_FILE`（cacert）并安装随包字体
-（`AGNES_VIDEO_FREE_FONTS`，供字幕渲染使用）。
+Nix 包会提供 `ffmpeg`、`ffprobe`、CA 证书和随包字体。非 Nix 环境默认从 `assets/fonts` 读取字幕字体。
 
 ## 项目结构
 
-```
+```text
 src/
-├── main.rs        # clap 子命令、interactive 向导与 status/resume
-├── models.rs      # Storyboard / Scene / StyleProfile / num_frames 计算
-├── split.rs       # 中英文分句（一句一拍）
-├── pipeline.rs    # 全流程编排（分句 → prompt → storyboard）
-├── styles/        # 风格注册表（realistic 族 + 共享负向词基线）
-└── tts/           # Rust 原生 edge-tts（kothok-edge-tts）
-assets/fonts/      # 思源黑体 SC（OFL）
-references/        # prompt 配方 / Agent 调用与流程细节
+├── main.rs        # CLI、视觉向导、状态和恢复
+├── models.rs      # Storyboard、视觉 Scene、风格和画幅
+├── pipeline.rs    # visual_plan -> storyboard
+├── agnes.rs       # Agnes 创建、轮询、下载和重试
+├── media/         # ffprobe、视觉拼接、混音、ASS 字幕
+└── styles/        # realistic 风格族和视频安全约束
+assets/fonts/      # 思源黑体（OFL）
+examples/          # visual_plan.v2 示例
+references/        # prompt 配方和 Agent 工作流
 ```
 
-## 开发状态
+## 开发检查
 
-- M0 ✅ 脚手架、clap 子命令、中英文分句、dry-run 预览
-- M1 🚧 TTS ✅；ffprobe 封装 + Agnes 视频 API 客户端 ✅；真实视频生成需配置 `AGNES_API_KEY` 后运行 `video`
-- M2 ✅ 成片组装（ffmpeg + libass：场景封装、concat、ASS 字幕、画幅校验）
-- M3 🚧 交互式向导 ✅；`status` / `resume` / `clean` ✅；Agent Skill ✅；visual_plan ✅；M4 GUI
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```

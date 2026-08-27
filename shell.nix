@@ -1,7 +1,7 @@
 # 传统 nix-shell 入口（无 Flakes 时的回退），与 flake.nix 的 devShells.default 等价。
 { pkgs ? import <nixpkgs> { } }:
 let
-  # ffmpeg（含 ffprobe）用于旁白时长探测与成片组装（M2）
+  # ffmpeg（含 ffprobe）用于视觉片段拼接、混音和字幕组装
   runtimeDeps = with pkgs; [ ffmpeg ];
 in
 pkgs.mkShell {
