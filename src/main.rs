@@ -29,7 +29,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// 启动交互式向导（无子命令时也会进入）
-    Interactive,
+    Interactive {
+        /// 只预览 storyboard，不执行生成
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// 输出可用风格列表
     Styles,
     /// 读取 visual_plan.v2.json，生成视觉 storyboard
@@ -63,6 +67,12 @@ struct SplitArgs {
     /// 输出 storyboard.json 路径
     #[arg(long, default_value = "storyboard.json")]
     out: PathBuf,
+    /// 全局参考图（本地路径或 http(s) URL），填充到没有 image 字段的场景，生成 ti2vid 图生视频
+    #[arg(long)]
+    image: Option<String>,
+    /// 全局关键帧（逗号分隔的本地路径或 URL，至少 2 张），填充到没有 image/keyframes 的场景，生成关键帧动画
+    #[arg(long)]
+    keyframes: Option<String>,
 }
 
 #[derive(Args)]
@@ -120,6 +130,12 @@ struct StatusArgs {
     /// 最终成片路径
     #[arg(long, default_value = "out/story.mp4")]
     output: PathBuf,
+    /// 自动轮询并刷新显示（Ctrl+C 退出）
+    #[arg(long)]
+    watch: bool,
+    /// watch 模式下的轮询间隔（秒），默认 3
+    #[arg(long, default_value_t = 3, value_name = "SEC")]
+    interval: u64,
 }
 
 #[derive(Args)]
@@ -192,7 +208,8 @@ enum CleanStage {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        None | Some(Command::Interactive) => cmd_interactive().await,
+        None => cmd_interactive(false).await,
+        Some(Command::Interactive { dry_run }) => cmd_interactive(dry_run).await,
         Some(Command::Styles) => list_styles(),
         Some(Command::Split(args)) => cmd_split(&args),
         Some(Command::Video(args)) => cmd_video(&args).await,
@@ -221,12 +238,82 @@ fn cmd_split(args: &SplitArgs) -> ExitCode {
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_else(|| "story".to_string())
     });
-    let storyboard = pipeline::build_visual_storyboard(&title, lang, &style, visual_scenes);
+    let mut storyboard = pipeline::build_visual_storyboard(&title, lang, &style, visual_scenes);
+    if let Some(image) = args.image.as_deref() {
+        // 场景自带 image 优先；--image 只填充既没有 image 也没有 keyframes 的场景。
+        for scene in &mut storyboard.scenes {
+            if scene.image.is_none() && scene.keyframes.is_empty() {
+                scene.image = Some(image.to_string());
+            }
+        }
+    }
+    if let Some(kf_arg) = args.keyframes.as_deref() {
+        let paths: Vec<String> = kf_arg
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if paths.len() < 2 {
+            return err("--keyframes 至少需要 2 张图片（逗号分隔）");
+        }
+        for scene in &mut storyboard.scenes {
+            if scene.image.is_none() && scene.keyframes.is_empty() {
+                scene.keyframes = paths.clone();
+            }
+        }
+    }
+    if let Err(error) = validate_storyboard_images(&storyboard) {
+        return err(&error);
+    }
     print_visual_scenes(&storyboard.scenes);
     match write_storyboard(&storyboard, &args.out) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => err(&error),
     }
+}
+
+/// 校验 storyboard 中每个场景的参考图/关键帧：http(s) URL 直接放行，本地路径必须存在。
+fn validate_storyboard_images(storyboard: &Storyboard) -> Result<(), String> {
+    for scene in &storyboard.scenes {
+        if scene.image.is_some() && !scene.keyframes.is_empty() {
+            return Err(format!(
+                "场景 {} 不能同时设置 image 和 keyframes，二选一",
+                scene.id
+            ));
+        }
+        if !scene.keyframes.is_empty() && scene.keyframes.len() < 2 {
+            return Err(format!(
+                "场景 {} 的 keyframes 至少需要 2 张参考图，当前 {} 张",
+                scene.id,
+                scene.keyframes.len()
+            ));
+        }
+        for keyframe in &scene.keyframes {
+            if keyframe.trim().is_empty() {
+                return Err(format!("场景 {} 包含空的 keyframes 项", scene.id));
+            }
+            if !image_is_url(keyframe) && !Path::new(keyframe).is_file() {
+                return Err(format!(
+                    "场景 {} 的关键帧不存在或不是文件: {keyframe}（支持本地路径或 http(s) URL）",
+                    scene.id
+                ));
+            }
+        }
+        if let Some(image) = &scene.image
+            && !image_is_url(image)
+            && !Path::new(image).is_file()
+        {
+            return Err(format!(
+                "场景 {} 的参考图不存在或不是文件: {image}（支持本地路径或 http(s) URL）",
+                scene.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn image_is_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
 }
 
 async fn cmd_video(args: &VideoArgs) -> ExitCode {
@@ -265,6 +352,22 @@ async fn cmd_video(args: &VideoArgs) -> ExitCode {
         args.poll_interval,
         args.poll_timeout
     );
+    let image_scenes = storyboard
+        .scenes
+        .iter()
+        .filter(|scene| scene.image.is_some())
+        .count();
+    let keyframe_scenes = storyboard
+        .scenes
+        .iter()
+        .filter(|scene| !scene.keyframes.is_empty())
+        .count();
+    if image_scenes > 0 {
+        println!("图生视频 (ti2vid): {image_scenes} 个场景使用参考图");
+    }
+    if keyframe_scenes > 0 {
+        println!("关键帧动画 (keyframes): {keyframe_scenes} 个场景使用多图关键帧");
+    }
     let (mut generated, mut skipped, mut failed) = (0, 0, 0);
     for index in 0..storyboard.scenes.len() {
         let scene = &storyboard.scenes[index];
@@ -287,7 +390,7 @@ async fn cmd_video(args: &VideoArgs) -> ExitCode {
             eprintln!("  {scene_id} 视频文件无效，将重新生成");
         }
 
-        let request = CreateVideoRequest::new(
+        let mut request = CreateVideoRequest::new(
             scene.prompt.clone(),
             scene.negative_prompt.clone(),
             storyboard.width,
@@ -295,12 +398,39 @@ async fn cmd_video(args: &VideoArgs) -> ExitCode {
             num_frames,
             storyboard.frame_rate_video,
         );
+        let mode_label = if !scene.keyframes.is_empty() {
+            match video_keyframes_payload(&scene.keyframes) {
+                Ok(payloads) => {
+                    request = request.with_keyframes(payloads);
+                    format!("，keyframes 关键帧（{} 张）", scene.keyframes.len())
+                }
+                Err(error) => {
+                    eprintln!("  {scene_id} 关键帧无效: {error}");
+                    failed += 1;
+                    continue;
+                }
+            }
+        } else if let Some(image) = scene.image.as_deref() {
+            match video_image_payload(image) {
+                Ok(payload) => {
+                    request = request.with_image(payload);
+                    "，ti2vid 参考图".to_string()
+                }
+                Err(error) => {
+                    eprintln!("  {scene_id} 参考图无效: {error}");
+                    failed += 1;
+                    continue;
+                }
+            }
+        } else {
+            String::new()
+        };
         let existing_task_id = scene.agnes_task_id.clone();
         let reusing_task = existing_task_id
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty());
         println!(
-            "  {scene_id} {}（{duration:.2}s，{num_frames} 帧）…",
+            "  {scene_id} {}（{duration:.2}s，{num_frames} 帧{mode_label}）…",
             if reusing_task {
                 "继续轮询已记录任务"
             } else {
@@ -465,16 +595,8 @@ async fn cmd_resume(args: &ResumeArgs) -> ExitCode {
     })
 }
 
-fn cmd_status(args: &StatusArgs) -> ExitCode {
-    let storyboard = match read_storyboard(&args.storyboard) {
-        Ok(storyboard) => storyboard,
-        Err(error) => return err(&error),
-    };
-    if storyboard.scenes.is_empty() {
-        return err("storyboard 没有任何视觉场景");
-    }
-    let clip_dir = args
-        .output
+fn render_status(storyboard: &Storyboard, video_dir: &Path, output: &Path) {
+    let clip_dir = output
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(".agnes-video-free");
@@ -484,17 +606,33 @@ fn cmd_status(args: &StatusArgs) -> ExitCode {
         storyboard.style,
         storyboard.scenes.len()
     );
-    println!("场景     时长      任务                  视频      clip      状态");
-    println!("────────────────────────────────────────────────────────");
+    println!(
+        "{} {} {} {} {} {} 状态",
+        pad_display("场景", 8),
+        pad_display("时长", 9),
+        pad_display("模式", 10),
+        pad_display("任务", 20),
+        pad_display("视频", 9),
+        pad_display("clip", 9)
+    );
+    println!("───────────────────────────────────────────────────────────────────────");
     let mut video_done = 0;
     let mut clip_done = 0;
+    let mut text_count = 0;
+    let mut ti2vid_count = 0;
+    let mut keyframe_count = 0;
     for scene in &storyboard.scenes {
-        let video = scene_path(scene.motion_video.as_deref(), &args.video_dir, &scene.id);
+        let video = scene_path(scene.motion_video.as_deref(), video_dir, &scene.id);
         let clip = clip_dir.join(format!("{}.mp4", scene.id));
         let video_ok = has_file(&video, MIN_VIDEO_BYTES);
         let clip_ok = has_file(&clip, 1);
         video_done += usize::from(video_ok);
         clip_done += usize::from(clip_ok);
+        match scene_mode(scene) {
+            SceneMode::Text => text_count += 1,
+            SceneMode::Ti2Vid => ti2vid_count += 1,
+            SceneMode::Keyframes => keyframe_count += 1,
+        }
         let state = if clip_ok {
             "ready"
         } else if video_ok {
@@ -505,9 +643,10 @@ fn cmd_status(args: &StatusArgs) -> ExitCode {
             "待视频"
         };
         println!(
-            "{:<8} {:<9.1} {:<20} {:<9} {:<9} {}",
-            scene.id,
-            scene.duration_sec,
+            "{} {} {:<10} {:<20} {:<9} {:<9} {}",
+            pad_display(&scene.id, 8),
+            pad_display(&format!("{:.1}", scene.duration_sec), 9),
+            scene_mode_label(scene),
             scene.agnes_task_id.as_deref().unwrap_or("—"),
             marker(video_ok),
             marker(clip_ok),
@@ -515,7 +654,7 @@ fn cmd_status(args: &StatusArgs) -> ExitCode {
         );
     }
     println!(
-        "视频 {}/{}，clip {}/{}",
+        "视频 {}/{}，clip {}/{} | 模式: 文生 {text_count} / ti2vid {ti2vid_count} / keyframes {keyframe_count}",
         video_done,
         storyboard.scenes.len(),
         clip_done,
@@ -523,9 +662,64 @@ fn cmd_status(args: &StatusArgs) -> ExitCode {
     );
     println!(
         "最终成片: {} {}",
-        marker(has_file(&args.output, MIN_VIDEO_BYTES)),
-        args.output.display()
+        marker(has_file(output, MIN_VIDEO_BYTES)),
+        output.display()
     );
+}
+
+fn cmd_status(args: &StatusArgs) -> ExitCode {
+    let storyboard = match read_storyboard(&args.storyboard) {
+        Ok(storyboard) => storyboard,
+        Err(error) => return err(&error),
+    };
+    if storyboard.scenes.is_empty() {
+        return err("storyboard 没有任何视觉场景");
+    }
+    if !args.watch {
+        render_status(&storyboard, &args.video_dir, &args.output);
+        return ExitCode::SUCCESS;
+    }
+    // watch 模式：持续轮询刷新
+    use std::time::Duration;
+    let interval = Duration::from_secs(args.interval);
+    loop {
+        // 清屏
+        print!("\x1B[2J\x1B[H");
+        if std::io::Write::flush(&mut std::io::stdout()).is_err() {
+            return err("清屏失败");
+        }
+        // 重新读取 storyboard（外部可能正在更新任务 ID 和视频路径）
+        let sb = match read_storyboard(&args.storyboard) {
+            Ok(sb) => sb,
+            Err(error) => {
+                println!("读取 storyboard 失败: {error}");
+                std::thread::sleep(interval);
+                continue;
+            }
+        };
+        if sb.scenes.is_empty() {
+            println!("storyboard 没有任何视觉场景");
+            std::thread::sleep(interval);
+            continue;
+        }
+        println!("[watch] 每 {}s 刷新 — Ctrl+C 退出", args.interval);
+        render_status(&sb, &args.video_dir, &args.output);
+        // 检查是否全部完成
+        let all_done = sb.scenes.iter().all(|s| {
+            let clip_dir = args
+                .output
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(".agnes-video-free");
+            let clip = clip_dir.join(format!("{}.mp4", s.id));
+            has_file(&clip, 1)
+        });
+        if all_done {
+            println!("\n✅ 所有场景已完成！");
+            break;
+        }
+        std::thread::sleep(interval);
+    }
     ExitCode::SUCCESS
 }
 
@@ -641,6 +835,55 @@ fn has_file(path: &Path, min_bytes: usize) -> bool {
         .unwrap_or(false)
 }
 
+/// 场景的生成模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SceneMode {
+    /// 文生视频：无参考图。
+    Text,
+    /// ti2vid 图生视频：单张参考图。
+    Ti2Vid,
+    /// keyframes 关键帧动画：至少两张参考图。
+    Keyframes,
+}
+
+fn scene_mode(scene: &Scene) -> SceneMode {
+    if !scene.keyframes.is_empty() {
+        SceneMode::Keyframes
+    } else if scene.image.is_some() {
+        SceneMode::Ti2Vid
+    } else {
+        SceneMode::Text
+    }
+}
+
+fn scene_mode_label(scene: &Scene) -> &'static str {
+    match scene_mode(scene) {
+        SceneMode::Text => "文生",
+        SceneMode::Ti2Vid => "ti2vid",
+        SceneMode::Keyframes => "keyframes",
+    }
+}
+
+/// 按终端显示宽度左对齐填充：CJK 字符计 2 列，其余计 1 列。
+fn pad_display(value: &str, width: usize) -> String {
+    let display_width: usize = value
+        .chars()
+        .map(|ch| if is_cjk_char(ch) { 2 } else { 1 })
+        .sum();
+    let padding = width.saturating_sub(display_width);
+    format!("{value}{}", " ".repeat(padding))
+}
+
+/// 判断字符是否为宽字符（CJK 表意文字及其全角形式，终端中占 2 列）。
+fn is_cjk_char(ch: char) -> bool {
+    matches!(ch as u32,
+        0x2E80..=0x9FFF   // 部首补充 .. CJK 统一表意文字（含 Ext A）
+        | 0xF900..=0xFAFF // CJK 兼容表意文字
+        | 0xFE30..=0xFE4F // CJK 兼容形式
+        | 0xFF00..=0xFF60 // 全角形式
+    )
+}
+
 fn scene_path(stored: Option<&str>, fallback_dir: &Path, id: &str) -> PathBuf {
     stored
         .map(PathBuf::from)
@@ -660,9 +903,13 @@ fn resolve_fonts_dir(path: &Path) -> Result<PathBuf, String> {
     Err(format!("字体目录不存在: {}", path.display()))
 }
 
-async fn cmd_interactive() -> ExitCode {
+async fn cmd_interactive(dry_run: bool) -> ExitCode {
     println!("╔══════════════════════════════════════════════════════╗");
-    println!("║       agnes-video-free 视觉视频交互式向导            ║");
+    if dry_run {
+        println!("║   agnes-video-free 视觉视频交互式向导  [DRY RUN]   ║");
+    } else {
+        println!("║       agnes-video-free 视觉视频交互式向导            ║");
+    }
     println!("╚══════════════════════════════════════════════════════╝");
     println!("输入 q 可在任意配置步骤取消。视觉场景与音频、字幕始终独立。\n");
 
@@ -730,6 +977,135 @@ async fn cmd_interactive() -> ExitCode {
         Ok(path) => path,
         Err(error) => return wizard_error(&error),
     };
+    // ── 全局视觉生成模式（作为无图场景的默认值） ──
+    let mode_options = vec![
+        "纯文生视频（无参考图）".to_string(),
+        "ti2vid 图生视频（一张参考图作为首帧）".to_string(),
+        "keyframes 关键帧动画（多张图平滑过渡）".to_string(),
+    ];
+    let mode_index = match prompt_choice(
+        "全局视觉生成模式（未单独编辑的场景将使用此模式）",
+        &mode_options,
+        0,
+    ) {
+        Ok(index) => index,
+        Err(error) => return wizard_error(&error),
+    };
+    // 全局参考图：None = 文生；Some(image) = ti2vid；keyframes_vec = keyframes
+    let global_image: Option<String>;
+    let global_keyframes: Option<Vec<String>>;
+    match mode_index {
+        0 => {
+            global_image = None;
+            global_keyframes = None;
+        }
+        1 => {
+            let img = match prompt_line("参考图路径或 URL（本地文件或 http(s) URL）", None)
+            {
+                Ok(value) if !value.trim().is_empty() => value,
+                Ok(_) => return wizard_error("ti2vid 模式需要提供参考图"),
+                Err(error) => return wizard_error(&error),
+            };
+            if !image_is_url(&img) && !Path::new(&img).is_file() {
+                return wizard_error(&format!(
+                    "参考图文件不存在: {img}（支持本地路径或 http(s) URL）"
+                ));
+            }
+            global_image = Some(img);
+            global_keyframes = None;
+        }
+        _ => {
+            let raw = match prompt_line("关键帧图片（逗号分隔的本地路径或 URL，至少 2 张）", None)
+            {
+                Ok(value) => value,
+                Err(error) => return wizard_error(&error),
+            };
+            let paths: Vec<String> = raw
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if paths.len() < 2 {
+                return wizard_error("keyframes 模式至少需要 2 张图片");
+            }
+            for p in &paths {
+                if !image_is_url(p) && !Path::new(p).is_file() {
+                    return wizard_error(&format!(
+                        "关键帧文件不存在: {p}（支持本地路径或 http(s) URL）"
+                    ));
+                }
+            }
+            global_image = None;
+            global_keyframes = Some(paths);
+        }
+    }
+    // ── 逐场景编辑 ──
+    let mut visual_scenes = visual_scenes;
+    let edit_options = vec![
+        "保持当前模式".to_string(),
+        "纯文生视频（无参考图）".to_string(),
+        "ti2vid 图生视频（一张参考图）".to_string(),
+        "keyframes 关键帧动画（多张图）".to_string(),
+    ];
+    for scene in &mut visual_scenes {
+        let current_mode = if !scene.keyframes.is_empty() {
+            format!("keyframes（{} 张）", scene.keyframes.len())
+        } else if scene.image.is_some() {
+            "ti2vid".to_string()
+        } else {
+            "纯文生".to_string()
+        };
+        println!(
+            "\n场景 {} [{}s] — {}",
+            scene.id, scene.duration_sec, scene.visual
+        );
+        println!("  当前模式: {current_mode}");
+        let edit_index = match prompt_choice("是否编辑此场景？", &edit_options, 0) {
+            Ok(index) => index,
+            Err(error) => return wizard_error(&error),
+        };
+        match edit_index {
+            0 => {} // 保持
+            1 => {
+                scene.image = None;
+                scene.keyframes.clear();
+            }
+            2 => {
+                let img = match prompt_line("参考图路径或 URL", None) {
+                    Ok(value) if !value.trim().is_empty() => value,
+                    Ok(_) => return wizard_error("ti2vid 需要提供参考图"),
+                    Err(error) => return wizard_error(&error),
+                };
+                if !image_is_url(&img) && !Path::new(&img).is_file() {
+                    return wizard_error(&format!("参考图文件不存在: {img}"));
+                }
+                scene.image = Some(img);
+                scene.keyframes.clear();
+            }
+            _ => {
+                let raw = match prompt_line("关键帧图片（逗号分隔，至少 2 张）", None)
+                {
+                    Ok(value) => value,
+                    Err(error) => return wizard_error(&error),
+                };
+                let paths: Vec<String> = raw
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if paths.len() < 2 {
+                    return wizard_error("keyframes 至少需要 2 张图片");
+                }
+                for p in &paths {
+                    if !image_is_url(p) && !Path::new(p).is_file() {
+                        return wizard_error(&format!("关键帧文件不存在: {p}"));
+                    }
+                }
+                scene.image = None;
+                scene.keyframes = paths;
+            }
+        }
+    }
     dotenvy::dotenv().ok();
     if std::env::var("AGNES_API_KEY")
         .ok()
@@ -743,13 +1119,31 @@ async fn cmd_interactive() -> ExitCode {
     let video_dir = project_dir.join("assets/videos");
     let fonts_dir = project_dir.join("assets/fonts");
     let output = project_dir.join("out").join(format!("{title}.mp4"));
-    let preview = pipeline::build_visual_storyboard(&title, lang, &style, visual_scenes);
+    // 直接用逐场景编辑后的 scenes 构建 storyboard，不再经 cmd_split 重读 plan。
+    let mut final_storyboard =
+        pipeline::build_visual_storyboard(&title, lang, &style, visual_scenes);
+    // 全局模式填充：只覆盖既没有 image 也没有 keyframes 的场景。
+    if let Some(ref image) = global_image {
+        for scene in &mut final_storyboard.scenes {
+            if scene.image.is_none() && scene.keyframes.is_empty() {
+                scene.image = Some(image.clone());
+            }
+        }
+    }
+    if let Some(ref kf_arg) = global_keyframes {
+        for scene in &mut final_storyboard.scenes {
+            if scene.image.is_none() && scene.keyframes.is_empty() {
+                scene.keyframes = kf_arg.clone();
+            }
+        }
+    }
+    // ── 配置确认（编辑后的最终状态） ──
     println!("\n═══ 配置确认 ═══");
     println!("模式: 独立视觉场景 + 外部轨道");
     println!(
         "视觉场景: {} 场 | 总时长: {:.1}s",
-        preview.scenes.len(),
-        preview
+        final_storyboard.scenes.len(),
+        final_storyboard
             .scenes
             .iter()
             .map(|scene| scene.duration_sec)
@@ -763,7 +1157,54 @@ async fn cmd_interactive() -> ExitCode {
     println!("背景音乐: {}", optional_path_display(bgm.as_deref()));
     println!("字幕: {}", optional_path_display(subtitles.as_deref()));
     println!("输出: {}", output.display());
-    print_visual_scenes(&preview.scenes);
+    let mode_label = match mode_index {
+        0 => "文生视频",
+        1 => "ti2vid 图生视频",
+        _ => "keyframes 关键帧动画",
+    };
+    println!("全局模式: {mode_label}");
+    if let Some(ref img) = global_image {
+        println!("  参考图: {img}");
+    }
+    if let Some(ref kf) = global_keyframes {
+        println!("  关键帧: {} 张", kf.len());
+    }
+    let (mut n_text, mut n_ti2vid, mut n_kf) = (0usize, 0usize, 0usize);
+    for scene in &final_storyboard.scenes {
+        match scene_mode(scene) {
+            SceneMode::Text => n_text += 1,
+            SceneMode::Ti2Vid => n_ti2vid += 1,
+            SceneMode::Keyframes => n_kf += 1,
+        }
+    }
+    println!("生成模式: 文生 {n_text} / ti2vid {n_ti2vid} / keyframes {n_kf}");
+    print_visual_scenes(&final_storyboard.scenes);
+    if dry_run {
+        println!("\n═══ DRY RUN ═══");
+        println!("已生成预览，未写入文件，未执行生成。\n");
+        println!("storyboard 预览:");
+        for scene in &final_storyboard.scenes {
+            let mode = scene_mode_label(scene);
+            let kf = if !scene.keyframes.is_empty() {
+                format!(" (keyframes: {} 张)", scene.keyframes.len())
+            } else if let Some(ref img) = scene.image {
+                format!(" (img: {img})")
+            } else {
+                String::new()
+            };
+            println!(
+                "  {} [{:.1}s / {} 帧 / {}{}] {}",
+                scene.id, scene.duration_sec, scene.num_frames, mode, kf, scene.visual
+            );
+        }
+        println!("\n完整 storyboard 可通过以下命令生成:");
+        println!(
+            "  agnes-video-free split --visual-plan {plan_display} --style {} --title \"{title}\" --out storyboard.json",
+            style.id,
+            plan_display = plan_path.display(),
+        );
+        return ExitCode::SUCCESS;
+    }
     let confirmed = match prompt_yes_no("确认开始生成视觉视频并组装？", true) {
         Ok(value) => value,
         Err(error) => return wizard_error(&error),
@@ -776,13 +1217,10 @@ async fn cmd_interactive() -> ExitCode {
         return err(&format!("创建项目目录失败: {error}"));
     }
     println!("\n═══ 1/3 写入视觉 storyboard ═══");
-    let code = cmd_split(&SplitArgs {
-        visual_plan: plan_path,
-        title: Some(title.clone()),
-        lang: lang.label().to_string(),
-        style: style.id.to_string(),
-        out: storyboard.clone(),
-    });
+    let code = match write_storyboard(&final_storyboard, &storyboard) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => err(&error),
+    };
     if code != ExitCode::SUCCESS {
         return code;
     }
@@ -949,10 +1387,87 @@ fn list_styles() -> ExitCode {
 
 fn print_visual_scenes(scenes: &[Scene]) {
     for scene in scenes {
+        let mode = scene_mode_label(scene);
+        let reference = if !scene.keyframes.is_empty() {
+            format!(" | keyframes: {} 张", scene.keyframes.len())
+        } else {
+            scene
+                .image
+                .as_deref()
+                .map(|value| format!(" | img: {value}"))
+                .unwrap_or_default()
+        };
         println!(
-            "  {} [{:.1}s / {} 帧] {}",
-            scene.id, scene.duration_sec, scene.num_frames, scene.visual
+            "  {} [{:.1}s / {} 帧 / {}{}] {}",
+            scene.id, scene.duration_sec, scene.num_frames, mode, reference, scene.visual
         );
+    }
+}
+
+/// 把场景的参考图转换成 Agnes API 的 image 字段值。
+///
+/// http(s) URL 原样传递；data URI 去掉头保留 base64；本地文件读取并 base64 编码。
+/// 与官方 ti2vid 实现一致：单图模式传纯 base64（不带 data: URI 头）。
+fn video_image_payload(value: &str) -> Result<String, String> {
+    if image_is_url(value) {
+        return Ok(value.to_string());
+    }
+    if let Some(rest) = value.strip_prefix("data:") {
+        let base64_part = rest.split(',').next_back().unwrap_or("").trim();
+        if base64_part.is_empty() {
+            return Err("data URI 缺少 base64 数据".to_string());
+        }
+        return Ok(base64_part.to_string());
+    }
+    let path = Path::new(value);
+    let bytes =
+        fs::read(path).map_err(|error| format!("读取参考图 {} 失败: {error}", path.display()))?;
+    use base64::Engine;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// 把场景的关键帧列表转换成 Agnes API 的 extra_body.image 值列表。
+fn video_keyframes_payload(values: &[String]) -> Result<Vec<String>, String> {
+    values
+        .iter()
+        .map(|value| video_keyframe_payload(value))
+        .collect()
+}
+
+/// 把单个关键帧转换成 API 值。
+///
+/// 与官方 keyframes 实现一致：数组里传 URL 或完整 data URI（带 mime 头），
+/// 与 ti2vid 单图的纯 base64 不同。
+fn video_keyframe_payload(value: &str) -> Result<String, String> {
+    if image_is_url(value) {
+        return Ok(value.to_string());
+    }
+    if let Some(rest) = value.strip_prefix("data:") {
+        if rest.split(',').next_back().unwrap_or("").trim().is_empty() {
+            return Err("data URI 缺少 base64 数据".to_string());
+        }
+        return Ok(value.to_string());
+    }
+    let path = Path::new(value);
+    let bytes =
+        fs::read(path).map_err(|error| format!("读取关键帧 {} 失败: {error}", path.display()))?;
+    use base64::Engine;
+    Ok(format!(
+        "data:{};base64,{}",
+        mime_for_path(path),
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+fn mime_for_path(path: &Path) -> &'static str {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg") => {
+            "image/jpeg"
+        }
+        Some(ext) if ext.eq_ignore_ascii_case("webp") => "image/webp",
+        Some(ext) if ext.eq_ignore_ascii_case("gif") => "image/gif",
+        Some(ext) if ext.eq_ignore_ascii_case("bmp") => "image/bmp",
+        _ => "image/png",
     }
 }
 
@@ -1016,6 +1531,39 @@ fn read_visual_scene_plan(path: &Path) -> Result<Vec<VisualSceneSpec>, String> {
                 path.display(),
                 scene.id
             ));
+        }
+        if let Some(image) = scene.image.as_deref()
+            && image.trim().is_empty()
+        {
+            return Err(format!(
+                "visual_plan {} 中场景 {} 的 image 不能为空",
+                path.display(),
+                scene.id
+            ));
+        }
+        if scene.image.is_some() && !scene.keyframes.is_empty() {
+            return Err(format!(
+                "visual_plan {} 中场景 {} 不能同时设置 image 和 keyframes，二选一",
+                path.display(),
+                scene.id
+            ));
+        }
+        if !scene.keyframes.is_empty() && scene.keyframes.len() < 2 {
+            return Err(format!(
+                "visual_plan {} 中场景 {} 的 keyframes 至少需要 2 张参考图，当前 {} 张",
+                path.display(),
+                scene.id,
+                scene.keyframes.len()
+            ));
+        }
+        for keyframe in &scene.keyframes {
+            if keyframe.trim().is_empty() {
+                return Err(format!(
+                    "visual_plan {} 中场景 {} 包含空的 keyframes 项",
+                    path.display(),
+                    scene.id
+                ));
+            }
         }
         if !scene.duration_sec.is_finite() || !(1.7..=18.3).contains(&scene.duration_sec) {
             return Err(format!(
@@ -1081,5 +1629,413 @@ mod tests {
         assert!(!safe_scene_id("../v01"));
         assert!(!safe_scene_id("v/01"));
         assert!(safe_scene_id("v01"));
+    }
+
+    #[test]
+    fn visual_plan_parser_accepts_optional_image_and_rejects_empty() {
+        let path = std::env::temp_dir().join(format!(
+            "agnes-video-free-image-{}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            r#"{"scenes":[{"id":"v01","visual":"a street, morning light, slow tracking shot","duration_sec":8.0,"image":"https://example.com/ref.png"},{"id":"v02","visual":"a park, afternoon light, slow pan","duration_sec":8.0}]}"#,
+        )
+        .unwrap();
+        let plan = read_visual_scene_plan(&path).unwrap();
+        assert_eq!(
+            plan[0].image.as_deref(),
+            Some("https://example.com/ref.png")
+        );
+        assert!(plan[1].image.is_none());
+        fs::write(
+            &path,
+            r#"{"scenes":[{"id":"v01","visual":"a street, morning light, slow tracking shot","duration_sec":8.0,"image":"  "}]}"#,
+        )
+        .unwrap();
+        assert!(read_visual_scene_plan(&path).is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn video_image_payload_handles_url_data_uri_and_local_file() {
+        assert_eq!(
+            video_image_payload("https://example.com/ref.png").unwrap(),
+            "https://example.com/ref.png"
+        );
+        assert_eq!(
+            video_image_payload("data:image/png;base64,QUJD").unwrap(),
+            "QUJD"
+        );
+        assert!(video_image_payload("data:image/png;base64,").is_err());
+        let path =
+            std::env::temp_dir().join(format!("agnes-video-free-ref-{}.png", std::process::id()));
+        let bytes = vec![0x89u8, 0x50, 0x4e, 0x47, 0x0a, 0x1a, 0x0a];
+        fs::write(&path, &bytes).unwrap();
+        use base64::Engine;
+        let expected = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        assert_eq!(
+            video_image_payload(&path.display().to_string()).unwrap(),
+            expected
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn visual_plan_parser_rejects_invalid_keyframes() {
+        let path = std::env::temp_dir().join(format!(
+            "agnes-video-free-keyframes-{}.json",
+            std::process::id()
+        ));
+        // 只有 1 张 keyframes。
+        fs::write(
+            &path,
+            r#"{"scenes":[{"id":"v01","visual":"a street, morning light, slow tracking shot","duration_sec":8.0,"keyframes":["refs/a.png"]}]}"#,
+        )
+        .unwrap();
+        assert!(read_visual_scene_plan(&path).is_err());
+        // 同时设置 image 和 keyframes。
+        fs::write(
+            &path,
+            r#"{"scenes":[{"id":"v01","visual":"a street, morning light, slow tracking shot","duration_sec":8.0,"image":"refs/a.png","keyframes":["refs/a.png","refs/b.png"]}]}"#,
+        )
+        .unwrap();
+        assert!(read_visual_scene_plan(&path).is_err());
+        // 合法：至少 2 张 keyframes，且不带 image。
+        fs::write(
+            &path,
+            r#"{"scenes":[{"id":"v01","visual":"a street, morning light, slow tracking shot","duration_sec":8.0,"keyframes":["refs/a.png","refs/b.png"]}]}"#,
+        )
+        .unwrap();
+        let plan = read_visual_scene_plan(&path).unwrap();
+        assert_eq!(plan[0].keyframes.len(), 2);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn video_keyframe_payload_handles_url_data_uri_and_local_file() {
+        assert_eq!(
+            video_keyframe_payload("https://example.com/kf.png").unwrap(),
+            "https://example.com/kf.png"
+        );
+        assert_eq!(
+            video_keyframe_payload("data:image/png;base64,QUJD").unwrap(),
+            "data:image/png;base64,QUJD"
+        );
+        assert!(video_keyframe_payload("data:image/png;base64,").is_err());
+        // 本地文件 → 完整 data URI（带 mime 头），区别于 ti2vid 单图的纯 base64。
+        let path =
+            std::env::temp_dir().join(format!("agnes-video-free-kf-{}.jpg", std::process::id()));
+        let bytes = vec![0xff, 0xd8, 0xff, 0xd9];
+        fs::write(&path, &bytes).unwrap();
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let expected = format!("data:image/jpeg;base64,{encoded}");
+        assert_eq!(
+            video_keyframe_payload(&path.display().to_string()).unwrap(),
+            expected
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn split_image_flag_skips_keyframe_scenes() {
+        let dir =
+            std::env::temp_dir().join(format!("agnes-video-free-split-kf-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let global_image = dir.join("global.png");
+        fs::write(&global_image, b"global").unwrap();
+        let plan = dir.join("plan.json");
+        fs::write(
+            &plan,
+            r#"{"scenes":[{"id":"v01","visual":"a smooth transition between two shots, morning light, slow pan","duration_sec":8.0,"keyframes":["https://example.com/kf1.png","https://example.com/kf2.png"]},{"id":"v02","visual":"a park, afternoon light, slow pan","duration_sec":8.0}]}"#,
+        )
+        .unwrap();
+        let out = dir.join("storyboard.json");
+        let code = cmd_split(&SplitArgs {
+            visual_plan: plan,
+            title: Some("测试".to_string()),
+            lang: "zh".to_string(),
+            style: "realistic-cinematic".to_string(),
+            out: out.clone(),
+            image: Some(global_image.display().to_string()),
+            keyframes: None,
+        });
+        assert_eq!(code, ExitCode::SUCCESS);
+        let storyboard = read_storyboard(&out).unwrap();
+        // keyframes 场景不被 --image 覆盖，v02 被填充。
+        assert!(storyboard.scenes[0].image.is_none());
+        assert_eq!(storyboard.scenes[0].keyframes.len(), 2);
+        assert_eq!(
+            storyboard.scenes[1].image.as_deref(),
+            Some(global_image.to_str().unwrap())
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn split_keyframes_flag_fills_scenes_without_image_or_keyframes() {
+        let dir = std::env::temp_dir().join(format!(
+            "agnes-video-free-split-kf-flag-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let kf_a = dir.join("a.png");
+        let kf_b = dir.join("b.png");
+        fs::write(&kf_a, b"a").unwrap();
+        fs::write(&kf_b, b"b").unwrap();
+        let plan = dir.join("plan.json");
+        // v01 自带 image，v02 自带 keyframes，v03 纯文生（应被 --keyframes 填充）
+        fs::write(
+            &plan,
+            r#"{"scenes":[{"id":"v01","visual":"a street, morning light","duration_sec":8.0,"image":"https://example.com/ref.png"},{"id":"v02","visual":"a park, afternoon light","duration_sec":8.0,"keyframes":["https://example.com/kf1.png","https://example.com/kf2.png"]},{"id":"v03","visual":"a room, evening light","duration_sec":8.0}]}"#,
+        )
+        .unwrap();
+        let kf_a_json = kf_a.display().to_string().replace('\\', "/");
+        let kf_b_json = kf_b.display().to_string().replace('\\', "/");
+        let out = dir.join("storyboard.json");
+        let keyframes_arg = format!("{kf_a_json},{kf_b_json}");
+        let code = cmd_split(&SplitArgs {
+            visual_plan: plan,
+            title: Some("测试".to_string()),
+            lang: "zh".to_string(),
+            style: "realistic-cinematic".to_string(),
+            out: out.clone(),
+            image: None,
+            keyframes: Some(keyframes_arg),
+        });
+        assert_eq!(code, ExitCode::SUCCESS);
+        let storyboard = read_storyboard(&out).unwrap();
+        // v01 自带 image，不被覆盖
+        assert_eq!(
+            storyboard.scenes[0].image.as_deref(),
+            Some("https://example.com/ref.png")
+        );
+        assert!(storyboard.scenes[0].keyframes.is_empty());
+        // v02 自带 keyframes，不被覆盖
+        assert!(storyboard.scenes[1].image.is_none());
+        assert_eq!(storyboard.scenes[1].keyframes.len(), 2);
+        // v03 纯文生 → 被 --keyframes 填充
+        assert!(storyboard.scenes[2].image.is_none());
+        assert_eq!(storyboard.scenes[2].keyframes.len(), 2);
+        assert_eq!(storyboard.scenes[2].keyframes[0], kf_a.to_str().unwrap());
+        assert_eq!(storyboard.scenes[2].keyframes[1], kf_b.to_str().unwrap());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn split_keyframes_flag_rejects_less_than_two() {
+        let dir = std::env::temp_dir().join(format!(
+            "agnes-video-free-split-kf-reject-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let plan = dir.join("plan.json");
+        fs::write(
+            &plan,
+            r#"{"scenes":[{"id":"v01","visual":"a street, morning light","duration_sec":8.0}]}}"#,
+        )
+        .unwrap();
+        let out = dir.join("storyboard.json");
+        // 只传 1 张
+        let code = cmd_split(&SplitArgs {
+            visual_plan: plan.clone(),
+            title: Some("测试".to_string()),
+            lang: "zh".to_string(),
+            style: "realistic-cinematic".to_string(),
+            out: out.clone(),
+            image: None,
+            keyframes: Some("refs/a.png".to_string()),
+        });
+        assert_ne!(code, ExitCode::SUCCESS);
+        // 空字符串
+        let code = cmd_split(&SplitArgs {
+            visual_plan: plan,
+            title: Some("测试".to_string()),
+            lang: "zh".to_string(),
+            style: "realistic-cinematic".to_string(),
+            out,
+            image: None,
+            keyframes: Some("  ".to_string()),
+        });
+        assert_ne!(code, ExitCode::SUCCESS);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pad_display_counts_cjk_as_two_columns() {
+        assert_eq!(pad_display("文生", 6), "文生  ");
+        assert_eq!(pad_display("ti2vid", 6), "ti2vid");
+        assert_eq!(pad_display("keyframes", 6), "keyframes");
+        assert_eq!(pad_display("v", 3), "v  ");
+    }
+
+    #[test]
+    fn status_watch_args_default_and_custom() {
+        use clap::Parser;
+        // 默认值：watch=false, interval=3
+        let cli = Cli::try_parse_from(["prog", "status"]).unwrap();
+        if let Some(Command::Status(args)) = cli.command {
+            assert!(!args.watch);
+            assert_eq!(args.interval, 3);
+        } else {
+            panic!("expected Status command");
+        }
+        // 自定义 --watch --interval 5
+        let cli = Cli::try_parse_from(["prog", "status", "--watch", "--interval", "5"]).unwrap();
+        if let Some(Command::Status(args)) = cli.command {
+            assert!(args.watch);
+            assert_eq!(args.interval, 5);
+        } else {
+            panic!("expected Status command");
+        }
+    }
+
+    #[test]
+    fn scene_mode_detects_generation_mode() {
+        let make_scene = |image: Option<&str>, keyframes: Vec<&str>| Scene {
+            id: "v01".to_string(),
+            visual: "a street, morning light, slow tracking shot".to_string(),
+            prompt: "prompt".to_string(),
+            negative_prompt: "negative".to_string(),
+            motion_video: None,
+            agnes_task_id: None,
+            image: image.map(str::to_string),
+            keyframes: keyframes.into_iter().map(str::to_string).collect(),
+            duration_sec: 8.0,
+            num_frames: 193,
+        };
+        assert_eq!(scene_mode(&make_scene(None, vec![])), SceneMode::Text);
+        assert_eq!(scene_mode_label(&make_scene(None, vec![])), "文生");
+        assert_eq!(
+            scene_mode(&make_scene(Some("refs/a.png"), vec![])),
+            SceneMode::Ti2Vid
+        );
+        assert_eq!(
+            scene_mode_label(&make_scene(Some("refs/a.png"), vec![])),
+            "ti2vid"
+        );
+        assert_eq!(
+            scene_mode(&make_scene(None, vec!["refs/a.png", "refs/b.png"])),
+            SceneMode::Keyframes
+        );
+        assert_eq!(
+            scene_mode_label(&make_scene(None, vec!["refs/a.png", "refs/b.png"])),
+            "keyframes"
+        );
+    }
+
+    #[test]
+    fn split_image_flag_fills_scenes_without_image() {
+        let dir =
+            std::env::temp_dir().join(format!("agnes-video-free-split-img-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let own_image = dir.join("own.png");
+        let global_image = dir.join("global.png");
+        fs::write(&own_image, b"own").unwrap();
+        fs::write(&global_image, b"global").unwrap();
+        let plan = dir.join("plan.json");
+        // JSON 中使用正斜杠路径，避免 Windows 反斜杠破坏 JSON 转义。
+        let own_image_json = own_image.display().to_string().replace('\\', "/");
+        fs::write(
+            &plan,
+            format!(
+                r#"{{"scenes":[{{"id":"v01","visual":"a street, morning light, slow tracking shot","duration_sec":8.0,"image":"{}"}},{{"id":"v02","visual":"a park, afternoon light, slow pan","duration_sec":8.0}}]}}"#,
+                own_image_json
+            ),
+        )
+        .unwrap();
+        let out = dir.join("storyboard.json");
+        let code = cmd_split(&SplitArgs {
+            visual_plan: plan,
+            title: Some("测试".to_string()),
+            lang: "zh".to_string(),
+            style: "realistic-cinematic".to_string(),
+            out: out.clone(),
+            image: Some(global_image.display().to_string()),
+            keyframes: None,
+        });
+        assert_eq!(code, ExitCode::SUCCESS);
+        let storyboard = read_storyboard(&out).unwrap();
+        assert_eq!(
+            storyboard.scenes[0].image.as_deref(),
+            Some(own_image_json.as_str())
+        );
+        assert_eq!(
+            storyboard.scenes[1].image.as_deref(),
+            Some(global_image.to_str().unwrap())
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn per_scene_edit_overrides_global_mode() {
+        // 模拟向导中逐场景编辑后的效果：
+        // v01 保持纯文生，v02 编辑为 ti2vid，v03 编辑为 keyframes
+        let scenes = vec![
+            VisualSceneSpec {
+                id: "v01".to_string(),
+                visual: "a street".to_string(),
+                duration_sec: 8.0,
+                image: None,
+                keyframes: vec![],
+            },
+            VisualSceneSpec {
+                id: "v02".to_string(),
+                visual: "a park".to_string(),
+                duration_sec: 8.0,
+                image: Some("https://example.com/ref.png".to_string()),
+                keyframes: vec![],
+            },
+            VisualSceneSpec {
+                id: "v03".to_string(),
+                visual: "a room".to_string(),
+                duration_sec: 8.0,
+                image: None,
+                keyframes: vec![
+                    "https://a.com/kf1.png".to_string(),
+                    "https://a.com/kf2.png".to_string(),
+                ],
+            },
+        ];
+        let style = styles::by_id("realistic-cinematic").unwrap();
+        let mut storyboard = pipeline::build_visual_storyboard("test", Lang::Zh, &style, scenes);
+        // 全局文生模式：不应覆盖已编辑的场景
+        assert!(storyboard.scenes[0].image.is_none());
+        assert!(storyboard.scenes[0].keyframes.is_empty());
+        assert_eq!(
+            storyboard.scenes[1].image.as_deref(),
+            Some("https://example.com/ref.png")
+        );
+        assert!(storyboard.scenes[1].keyframes.is_empty());
+        assert!(storyboard.scenes[2].image.is_none());
+        assert_eq!(storyboard.scenes[2].keyframes.len(), 2);
+        // 全局 ti2vid 模式：只填充 v01
+        let global_image = Some("https://example.com/global.png".to_string());
+        let global_keyframes: Option<Vec<String>> = None;
+        if let Some(ref image) = global_image {
+            for scene in &mut storyboard.scenes {
+                if scene.image.is_none() && scene.keyframes.is_empty() {
+                    scene.image = Some(image.clone());
+                }
+            }
+        }
+        if let Some(ref kf) = global_keyframes {
+            for scene in &mut storyboard.scenes {
+                if scene.image.is_none() && scene.keyframes.is_empty() {
+                    scene.keyframes = kf.clone();
+                }
+            }
+        }
+        // v01 被全局填充，v02/v03 保持不变
+        assert_eq!(
+            storyboard.scenes[0].image.as_deref(),
+            Some("https://example.com/global.png")
+        );
+        assert_eq!(
+            storyboard.scenes[1].image.as_deref(),
+            Some("https://example.com/ref.png")
+        );
+        assert_eq!(storyboard.scenes[2].keyframes.len(), 2);
     }
 }

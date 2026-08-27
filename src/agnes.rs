@@ -51,6 +51,17 @@ pub struct AgnesClient {
     options: AgnesOptions,
 }
 
+/// 多图/关键帧模式的附加请求体。
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ExtraBody {
+    /// 输入图片数组（URL 或 data URI）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub image: Vec<String>,
+    /// 附加模式，如 "keyframes"。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
 /// 创建任务请求体。
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateVideoRequest {
@@ -61,6 +72,15 @@ pub struct CreateVideoRequest {
     pub height: u32,
     pub num_frames: u32,
     pub frame_rate: u32,
+    /// 图生视频参考图（http(s) URL 或 base64，不带 data: URI 头）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// 生成模式，如图生视频为 "ti2vid"。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// 多图/关键帧模式的附加请求体。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_body: Option<ExtraBody>,
 }
 
 impl CreateVideoRequest {
@@ -80,7 +100,26 @@ impl CreateVideoRequest {
             height,
             num_frames,
             frame_rate,
+            image: None,
+            mode: None,
+            extra_body: None,
         }
+    }
+
+    /// 启用 ti2vid 图生视频模式：`image` 为参考图（URL 或 base64）。
+    pub fn with_image(mut self, image: impl Into<String>) -> Self {
+        self.image = Some(image.into());
+        self.mode = Some("ti2vid".to_string());
+        self
+    }
+
+    /// 启用 keyframes 关键帧动画：`images` 为至少 2 张参考图（URL 或 data URI）。
+    pub fn with_keyframes(mut self, images: Vec<String>) -> Self {
+        self.extra_body = Some(ExtraBody {
+            image: images,
+            mode: Some("keyframes".to_string()),
+        });
+        self
     }
 }
 
@@ -357,6 +396,36 @@ mod tests {
         assert_eq!(value["model"], MODEL);
         assert_eq!(value["num_frames"], 121);
         assert_eq!(value["frame_rate"], 24);
+        assert!(value.get("image").is_none());
+        assert!(value.get("mode").is_none());
+    }
+
+    #[test]
+    fn ti2vid_request_includes_image_and_mode() {
+        let req = CreateVideoRequest::new("prompt", "negative", 720, 1280, 121, 24)
+            .with_image("aGVsbG8=");
+        let value = serde_json::to_value(req).unwrap();
+        assert_eq!(value["image"], "aGVsbG8=");
+        assert_eq!(value["mode"], "ti2vid");
+        assert!(value.get("extra_body").is_none());
+    }
+
+    #[test]
+    fn keyframes_request_includes_extra_body() {
+        let req =
+            CreateVideoRequest::new("prompt", "negative", 720, 1280, 121, 24).with_keyframes(vec![
+                "https://example.com/kf1.png".to_string(),
+                "https://example.com/kf2.png".to_string(),
+            ]);
+        let value = serde_json::to_value(req).unwrap();
+        assert_eq!(value["extra_body"]["mode"], "keyframes");
+        assert_eq!(
+            value["extra_body"]["image"][0],
+            "https://example.com/kf1.png"
+        );
+        assert_eq!(value["extra_body"]["image"].as_array().unwrap().len(), 2);
+        assert!(value.get("image").is_none());
+        assert!(value.get("mode").is_none());
     }
 
     #[test]

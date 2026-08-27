@@ -101,6 +101,11 @@ pub struct VisualSceneSpec {
     pub id: String,
     pub visual: String,
     pub duration_sec: f64,
+    /// 可选参考图（本地路径或 http(s) URL），存在时生成 ti2vid 图生视频。
+    pub image: Option<String>,
+    /// 可选关键帧动画参考图（至少 2 张，本地路径或 http(s) URL），存在时生成 keyframes 动画。
+    #[serde(default)]
+    pub keyframes: Vec<String>,
 }
 
 /// A visual scene is deliberately independent from audio and subtitle cues.
@@ -114,6 +119,12 @@ pub struct Scene {
     pub motion_video: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agnes_task_id: Option<String>,
+    /// 可选参考图（本地路径或 http(s) URL），存在时该场景以 ti2vid 模式生成。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// 可选关键帧动画参考图（至少 2 张），存在时该场景以 keyframes 模式生成。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keyframes: Vec<String>,
     pub duration_sec: f64,
     pub num_frames: u32,
 }
@@ -164,13 +175,58 @@ mod tests {
             negative_prompt: "negative".to_string(),
             motion_video: None,
             agnes_task_id: None,
+            image: None,
+            keyframes: vec![],
             duration_sec: 8.0,
             num_frames: 193,
         };
         let value = serde_json::to_value(scene).unwrap();
         assert!(value.get("caption").is_none());
         assert!(value.get("narration").is_none());
+        assert!(value.get("image").is_none());
+        assert!(value.get("keyframes").is_none());
         assert_eq!(value["duration_sec"], 8.0);
+    }
+
+    #[test]
+    fn scene_serializes_reference_image_when_present() {
+        let scene = Scene {
+            id: "v01".to_string(),
+            visual: "a quiet street, morning light, slow tracking shot".to_string(),
+            prompt: "prompt".to_string(),
+            negative_prompt: "negative".to_string(),
+            motion_video: None,
+            agnes_task_id: None,
+            image: Some("refs/woman.png".to_string()),
+            keyframes: vec![],
+            duration_sec: 8.0,
+            num_frames: 193,
+        };
+        let value = serde_json::to_value(&scene).unwrap();
+        assert_eq!(value["image"], "refs/woman.png");
+        let round_trip: Scene = serde_json::from_value(value).unwrap();
+        assert_eq!(round_trip.image.as_deref(), Some("refs/woman.png"));
+    }
+
+    #[test]
+    fn scene_serializes_keyframes_when_present() {
+        let scene = Scene {
+            id: "v01".to_string(),
+            visual: "a quiet street, morning light, slow tracking shot".to_string(),
+            prompt: "prompt".to_string(),
+            negative_prompt: "negative".to_string(),
+            motion_video: None,
+            agnes_task_id: None,
+            image: None,
+            keyframes: vec!["refs/a.png".to_string(), "refs/b.png".to_string()],
+            duration_sec: 8.0,
+            num_frames: 193,
+        };
+        let value = serde_json::to_value(&scene).unwrap();
+        assert_eq!(value["keyframes"][0], "refs/a.png");
+        assert_eq!(value["keyframes"].as_array().unwrap().len(), 2);
+        let round_trip: Scene = serde_json::from_value(value).unwrap();
+        assert_eq!(round_trip.keyframes.len(), 2);
     }
 
     #[test]

@@ -60,12 +60,17 @@ $BIN assemble \
 ## 状态与恢复
 
 ```bash
+# 单次查看
 $BIN status --storyboard storyboard.json
+
+# watch 模式：每 3s 自动刷新（--interval 自定义秒数），全部完成后退出
+$BIN status --watch --interval 5
+
 $BIN resume --storyboard storyboard.json \
   --audio voiceover.mp3 --bgm music.mp3 --subtitles captions.srt
 ```
 
-`video` 按视觉场景时长计算 `8n+1` 帧数，成功下载的 MP4 自动跳过。`resume` 只补齐缺失视觉视频；素材齐全且成片有效时跳过组装。
+`video` 按视觉场景时长计算 `8n+1` 帧数，成功下载的 MP4 自动跳过。`resume` 只补齐缺失视觉视频；素材齐全且成片有效时跳过组装。`status --watch` 持续轮询 storyboard 文件，外部 `video`/`resume` 写入新任务 ID 或视频文件后自动反映在刷新中。
 
 清理前先预览：
 
@@ -80,9 +85,11 @@ $BIN clean --storyboard storyboard.json --scene v01 --stage all --yes
 $BIN interactive
 # 或直接运行
 agnes-video-free
+# dry-run 模式：只预览不生成
+$BIN interactive --dry-run
 ```
 
-向导流程是：选择风格和语言 -> 读取 visual plan -> 选择项目目录 -> 选择主音轨、BGM、字幕 -> 预览场景和总时长 -> 确认 -> 生成视频 -> 组装成片。向导不生成 TTS，也没有旧的旁白驱动画面模式。
+向导流程是：选择风格和语言 -> 读取 visual plan -> 选择项目目录 -> 选择主音轨、BGM、字幕 -> 全局视觉生成模式（纯文生 / ti2vid / keyframes，按需输入参考图）-> 逐场景编辑（可单独覆盖每个场景的参考图或关键帧）-> 预览最终状态、模式分布和总时长 -> 确认 -> 生成视频 -> 组装成片。向导不生成 TTS，也没有旧的旁白驱动画面模式。--dry-run 跳过写入和生成，只输出预览。
 
 ## 提示词要求
 

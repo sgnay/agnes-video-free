@@ -25,6 +25,8 @@ pub fn build_visual_storyboard(
                 negative_prompt: style.negative.clone(),
                 motion_video: None,
                 agnes_task_id: None,
+                image: spec.image,
+                keyframes: spec.keyframes,
                 duration_sec,
                 num_frames: num_frames_for_duration(duration_sec),
             }
@@ -67,6 +69,8 @@ mod tests {
                 id: "v01".to_string(),
                 visual: "a rainy street, morning light, slow tracking shot".to_string(),
                 duration_sec: 8.0,
+                image: None,
+                keyframes: vec![],
             }],
         );
         let scene = &storyboard.scenes[0];
@@ -81,6 +85,52 @@ mod tests {
     }
 
     #[test]
+    fn storyboard_carries_reference_image_for_ti2vid() {
+        let style = styles::by_id("realistic-cinematic").unwrap();
+        let storyboard = build_visual_storyboard(
+            "测试",
+            Lang::Zh,
+            &style,
+            vec![VisualSceneSpec {
+                id: "v01".to_string(),
+                visual: "a rainy street, morning light, slow tracking shot".to_string(),
+                duration_sec: 8.0,
+                image: Some("refs/woman.png".to_string()),
+                keyframes: vec![],
+            }],
+        );
+        assert_eq!(
+            storyboard.scenes[0].image.as_deref(),
+            Some("refs/woman.png")
+        );
+        assert_eq!(storyboard.scenes[0].num_frames, 193);
+    }
+
+    #[test]
+    fn storyboard_carries_keyframes_for_animation() {
+        let style = styles::by_id("realistic-cinematic").unwrap();
+        let storyboard = build_visual_storyboard(
+            "测试",
+            Lang::Zh,
+            &style,
+            vec![VisualSceneSpec {
+                id: "v01".to_string(),
+                visual: "a smooth transition between two shots, morning light, slow pan"
+                    .to_string(),
+                duration_sec: 8.0,
+                image: None,
+                keyframes: vec![
+                    "refs/a.png".to_string(),
+                    "refs/b.png".to_string(),
+                    "refs/c.png".to_string(),
+                ],
+            }],
+        );
+        assert_eq!(storyboard.scenes[0].keyframes.len(), 3);
+        assert!(storyboard.scenes[0].image.is_none());
+    }
+
+    #[test]
     fn storyboard_carries_style_canvas() {
         let style = styles::by_id("realistic-vlog").unwrap();
         let storyboard = build_visual_storyboard(
@@ -91,6 +141,8 @@ mod tests {
                 id: "v01".to_string(),
                 visual: "a bright kitchen, morning light, slow push-in".to_string(),
                 duration_sec: 4.0,
+                image: None,
+                keyframes: vec![],
             }],
         );
         assert_eq!(storyboard.style, "realistic-vlog");
