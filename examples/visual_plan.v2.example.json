@@ -1,0 +1,29 @@
+{
+  "scenes": [
+    {
+      "id": "v01",
+      "visual": "one consistent Central Plains Chinese woman in her late twenties, oval face, warm gentle features, fair skin, long black hair tied in a low ponytail, pale blue blouse and dark navy skirt, early morning in a traditional courtyard house in Kaifeng, Henan, she wakes up and opens wooden window shutters, soft golden sunlight, simple elegant home interior, quiet realistic lifestyle footage, slow cinematic push-in",
+      "duration_sec": 8.0
+    },
+    {
+      "id": "v02",
+      "visual": "the same one consistent Central Plains Chinese woman, oval face, warm gentle features, fair skin, long black hair tied in a low ponytail, pale blue blouse and dark navy skirt, getting ready for work in front of a simple mirror, adjusting her collar beside a small breakfast table with steamed buns and soy milk, warm morning light, natural understated appearance, realistic cinematic photography, gentle stable side camera movement",
+      "duration_sec": 8.0
+    },
+    {
+      "id": "v03",
+      "visual": "the same one consistent Central Plains Chinese woman, oval face, warm gentle features, fair skin, long black hair tied in a low ponytail, pale blue blouse and dark navy skirt, riding an electric bicycle through a waking residential street in Kaifeng, Henan, morning market stalls opening, vendors preparing hot soup and fresh steamed buns, bicycles and plane trees along the road, ancient city wall visible in the distance, she rides calmly toward work, authentic central Chinese city atmosphere, stable smooth tracking shot",
+      "duration_sec": 10.0
+    },
+    {
+      "id": "v04",
+      "visual": "the same one consistent Central Plains Chinese woman, oval face, warm gentle features, fair skin, long black hair tied in a low ponytail, pale blue blouse and dark navy skirt, arriving at a modern office building near the old city district, she parks her electric bicycle, straightens her shirt and hair, then walks toward the entrance while the morning sun illuminates the street, quiet confidence, stable slow forward dolly shot",
+      "duration_sec": 8.0
+    },
+    {
+      "id": "v05",
+      "visual": "inside a bright modern office, the same one consistent Central Plains Chinese woman, oval face, warm gentle features, fair skin, long black hair tied in a low ponytail, pale blue blouse and dark navy skirt, places her bag beside her desk, opens her laptop, and begins working as sunlight falls across the desk, subtle city movement visible through the window, calm focused morning atmosphere, natural colors, stable slow lateral camera movement",
+      "duration_sec": 8.0
+    }
+  ]
+}

@@ -523,4 +523,98 @@ mod tests {
         assert_eq!(std::fs::read(&out).unwrap(), video_bytes);
         std::fs::remove_file(out).unwrap();
     }
+
+    #[tokio::test]
+    async fn create_video_retries_after_429_and_succeeds() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
+
+        /// 首次返回 429（免费 key 限流），重试后正常创建任务。
+        struct RateLimitedThenCreated {
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl Respond for RateLimitedThenCreated {
+            fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    ResponseTemplate::new(429).set_body_string("rate limited")
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "video_id": "video-429",
+                        "status": "queued"
+                    }))
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/v1/videos"))
+            .and(header("authorization", "Bearer test-key"))
+            .respond_with(RateLimitedThenCreated {
+                calls: Arc::clone(&calls),
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        // 用可测量的退避时长验证客户端确实等待了 retry_429_delay 再重试。
+        let delay = Duration::from_millis(50);
+        let client = AgnesClient::with_options(
+            "test-key",
+            &server.uri(),
+            AgnesOptions {
+                retry_429_delay: delay,
+                ..AgnesOptions::default()
+            },
+        )
+        .unwrap();
+        let request = CreateVideoRequest::new("prompt", "negative", 720, 1280, 121, 24);
+        let started = Instant::now();
+        let task = client.create_video(&request).await.unwrap();
+        assert_eq!(task.video_id, "video-429");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            started.elapsed() >= delay,
+            "重试前应等待 retry_429_delay={delay:?}，实际 {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn create_video_fails_after_exhausting_429_retries() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/videos"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("rate limited"))
+            .expect(3) // 首次 + max_retries=2 次重试
+            .mount(&server)
+            .await;
+
+        let client = AgnesClient::with_options(
+            "test-key",
+            &server.uri(),
+            AgnesOptions {
+                max_retries: 2,
+                retry_429_delay: Duration::from_millis(1),
+                ..AgnesOptions::default()
+            },
+        )
+        .unwrap();
+        let request = CreateVideoRequest::new("prompt", "negative", 720, 1280, 121, 24);
+        match client.create_video(&request).await {
+            Err(AgnesError::Http { status, body }) => {
+                assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+                assert_eq!(body, "rate limited");
+            }
+            other => panic!("应返回 Http(429) 错误，实际 {other:?}"),
+        }
+    }
 }

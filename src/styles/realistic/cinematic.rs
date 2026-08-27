@@ -2,7 +2,7 @@
 //!
 //! 配方全文见 references/prompt-recipes.md §4。
 
-use crate::models::{Platform, StyleProfile, SubtitleStyle};
+use crate::models::{Platform, StyleProfile};
 
 use super::compose_negative;
 
@@ -10,7 +10,7 @@ use super::compose_negative;
 const STYLE_DNA: &str = "cinematic realism, photorealistic live-action cinematography, {aspect}, natural volumetric lighting, shallow depth of field, 35mm film grain, muted cinematic color grade with soft contrast, authentic real-world textures, shot on a modern cinema camera, no animation, no illustration, no cartoon, no 3D render";
 
 /// 固定运动尾。
-const MOTION_FOOTER: &str = "natural realistic motion, slow subtle cinematic camera movement, gentle subject movement, realistic cloth and physics, no morphing, no warping, no lip sync, no added text, settle naturally";
+const MOTION_FOOTER: &str = "natural realistic motion, slow subtle cinematic camera movement, gentle subject movement, realistic cloth and physics, one consistent human subject, anatomically correct body, one head, two arms, two hands, five fingers per hand, keep head rotation natural and under 30 degrees, preserve face and body proportions, stable locked-off motion, no jitter, no camera shake, no flicker, no morphing, no warping, no deformation, no watermark, no logo, no added text, settle naturally";
 
 /// 风格专属负向词（拼在共享基线之后）。
 const NEGATIVE_EXTRA: &str = "flat lighting, amateur video look";
@@ -29,13 +29,5 @@ pub fn profile() -> StyleProfile {
         motion_footer: MOTION_FOOTER,
         negative: compose_negative(NEGATIVE_EXTRA),
         canvas: CANVAS,
-        subtitle: SubtitleStyle {
-            font: "Source Han Sans SC",
-            font_file: "SourceHanSansSC-Regular.otf",
-            size: 40, // 720 宽基准
-            outline: 3,
-            color: "&H00FFFFFF",
-            outline_color: "&H00000000",
-        },
     }
 }

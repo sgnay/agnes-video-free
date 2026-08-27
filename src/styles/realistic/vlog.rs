@@ -2,7 +2,7 @@
 //!
 //! 配方全文见 references/prompt-recipes.md §5。
 
-use crate::models::{Platform, StyleProfile, SubtitleStyle};
+use crate::models::{Platform, StyleProfile};
 
 use super::compose_negative;
 
@@ -10,7 +10,7 @@ use super::compose_negative;
 const STYLE_DNA: &str = "realistic lifestyle vlog footage, photorealistic live-action, {aspect}, soft natural window light, bright airy exposure, warm cozy color palette, natural skin tones, authentic everyday textures, handheld vlog camera look, shallow depth of field, subtle film grain, no animation, no illustration, no cartoon, no 3D render";
 
 /// 固定运动尾。
-const MOTION_FOOTER: &str = "natural realistic motion, casual handheld camera feel, gentle everyday subject movement, realistic physics, no morphing, no warping, no lip sync, no added text, settle naturally";
+const MOTION_FOOTER: &str = "natural realistic motion, controlled handheld camera feel without shake or jitter, gentle everyday subject movement, realistic physics, one consistent human subject, anatomically correct body, one head, two arms, two hands, five fingers per hand, keep head rotation natural and under 30 degrees, preserve face and body proportions, stable continuous motion, no flicker, no morphing, no warping, no deformation, no watermark, no logo, no added text, settle naturally";
 
 /// 风格专属负向词（拼在共享基线之后；防止 vlog 变暗调/重颗粒电影感）。
 const NEGATIVE_EXTRA: &str = "heavy film grain, cinematic teal-orange grade, moody dark lighting";
@@ -29,13 +29,5 @@ pub fn profile() -> StyleProfile {
         motion_footer: MOTION_FOOTER,
         negative: compose_negative(NEGATIVE_EXTRA),
         canvas: CANVAS,
-        subtitle: SubtitleStyle {
-            font: "Source Han Sans SC",
-            font_file: "SourceHanSansSC-Regular.otf",
-            size: 48, // 3:4 画幅较宽，字号按比例放大一档
-            outline: 3,
-            color: "&H00FFFFFF",
-            outline_color: "&H00000000",
-        },
     }
 }
